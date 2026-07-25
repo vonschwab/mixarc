@@ -177,6 +177,116 @@ def score_seed_candidates(
     return out
 
 
+def resolve_pool_with_relaxation(
+    conn: sqlite3.Connection,
+    steering,
+    genre_id: str,
+    genre_name: str,
+    *,
+    start_threshold: float,
+    steps,
+    min_tracks: int,
+) -> tuple[set, dict, float]:
+    """Widen the similarity threshold until the pool supports ``min_tracks``.
+
+    Relaxation IS the threshold stepping down — there is no separate ladder
+    (spec §3.5). Every rung is logged with its resulting pool size so a starved
+    generation is diagnosable from the log alone.
+
+    Never raises on a thin genre: if no rung satisfies ``min_tracks``, the widest
+    attempt is returned (never-fail on the soft axes).
+    """
+    attempts = [float(start_threshold)] + [
+        float(s) for s in (steps or ()) if float(s) < float(start_threshold)
+    ]
+    widest: tuple = (set(), {}, attempts[-1])
+    for thr in attempts:
+        ids, sims = pool_track_ids(conn, steering, genre_id, genre_name, thr)
+        widest = (ids, sims, thr)
+        if len(ids) >= int(min_tracks):
+            logger.info(
+                "stage=genre_pool | relaxation settled threshold=%.3f tracks=%d "
+                "(needed %d)", thr, len(ids), int(min_tracks),
+            )
+            return ids, sims, thr
+        logger.info(
+            "stage=genre_pool | relaxation step threshold=%.3f tracks=%d < %d — widening",
+            thr, len(ids), int(min_tracks),
+        )
+    logger.warning(
+        "stage=genre_pool | genre=%s starved: widest threshold=%.3f yields %d tracks "
+        "(< %d). Generating from the widest pool.",
+        genre_id, widest[2], len(widest[0]), int(min_tracks),
+    )
+    return widest
+
+
+def canonicity_by_index(bundle, member_indices, popularity_db_path: str) -> dict:
+    """Bundle index -> within-artist Last.fm canonicity in [0, 1] (`1 - rank/N`).
+
+    This is the signal `rank` IS valid for: which track of an artist is the one
+    people know. Absent (uncached artist, or track outside the top-N) scores 0.0 —
+    unlike prominence, absence here is genuinely "not a known song of theirs".
+    """
+    from src.analyze.popularity_runner import (
+        get_artist_top_tracks_cached, resolve_top_tracks_to_rank,
+    )
+
+    by_artist: dict[str, list] = {}
+    for i in member_indices:
+        by_artist.setdefault(str(bundle.artist_keys[i]), []).append(int(i))
+    out: dict = {}
+    for artist_key, idxs in by_artist.items():
+        top = get_artist_top_tracks_cached(popularity_db_path, artist_key) or []
+        if not top:
+            continue
+        local = [
+            {"track_id": str(bundle.track_ids[i]),
+             "title": str(bundle.track_titles[i])} for i in idxs
+        ]
+        ranks = resolve_top_tracks_to_rank(top, local)
+        n = max(1, len(top))
+        id_to_index = {str(bundle.track_ids[i]): i for i in idxs}
+        for tid, rank in ranks.items():
+            if tid in id_to_index:
+                out[id_to_index[tid]] = 1.0 - float(rank) / n
+    return out
+
+
+def centrality_by_index(
+    db_path: str, bundle, member_indices, genre_id: str
+) -> dict:
+    """Bundle index -> genre purity in [0, 1].
+
+    Authority confidence for the chosen genre, divided down by how many OTHER
+    published genres the release carries: a release tagged only `shoegaze` is more
+    purely shoegaze than one carrying eight tags (spec §3.2).
+    """
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        rows = conn.execute(
+            "SELECT t.track_id, "
+            "       MAX(CASE WHEN reg.genre_id = ? THEN reg.confidence END) AS conf, "
+            "       COUNT(DISTINCT reg.genre_id) AS n_genres "
+            "FROM tracks t JOIN release_effective_genres reg ON reg.album_id = t.album_id "
+            "WHERE reg.assignment_layer IN ('observed_leaf', 'legacy') "
+            "GROUP BY t.track_id",
+            (str(genre_id),),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    finally:
+        conn.close()
+    by_id = {
+        str(r[0]): float(r[1] or 0.0) / (1.0 + 0.15 * max(0, int(r[2]) - 1))
+        for r in rows if r[1] is not None
+    }
+    return {
+        int(i): by_id[str(bundle.track_ids[i])]
+        for i in member_indices if str(bundle.track_ids[i]) in by_id
+    }
+
+
 def select_piers_from_clusters(
     clusters,
     scores: dict,

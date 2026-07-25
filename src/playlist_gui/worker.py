@@ -1522,6 +1522,7 @@ def handle_generate_playlist(cmd_data: Dict[str, Any]) -> None:
                     track_count,
                     dynamic=(cohesion_mode == "dynamic"),
                     cohesion_mode_override=cohesion_mode,
+                    seed_epoch=request.seed_epoch,
                 )
             elif mode == "history":
                 # Config/history-driven mode, matching the CLI batch-generation flow.

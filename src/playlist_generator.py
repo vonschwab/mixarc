@@ -2683,6 +2683,15 @@ class PlaylistGenerator:
             result['quality_warning'] = f"{artist_name}'s genres are isolated from your library - playlist generated without genre filtering"
         return result
 
+    @staticmethod
+    def _genre_pool_threshold(gp_cfg: dict, cohesion_mode: Optional[str]) -> float:
+        """Similarity threshold for the genre bridge pool, keyed by cohesion mode."""
+        key = f"similarity_threshold_{cohesion_mode or 'dynamic'}"
+        default = {
+            "strict": 0.50, "narrow": 0.42, "dynamic": 0.35, "discover": 0.20,
+        }.get(cohesion_mode or "dynamic", 0.35)
+        return float(gp_cfg.get(key, default))
+
     def create_playlist_for_genre(
         self,
         genre_name: Optional[str] = None,
@@ -2695,9 +2704,17 @@ class PlaylistGenerator:
         num_tracks: Optional[int] = None,
         mode: Optional[str] = None,
         random_seed: Optional[int] = None,
+        seed_epoch: int = 0,
     ) -> Optional[Dict[str, Any]]:
         """
-        Create a single playlist for a specific genre without requiring listening history
+        Create a single playlist for a specific genre without requiring listening history.
+
+        Resolves the genre against the authority (release_effective_genres via
+        src/genre/authority.py), builds a similarity-thresholded bridge pool with
+        relaxation, clusters the genre's exact members across artists in sonic
+        space, and selects one pier per cluster with a composite seed score
+        (prominence/canonicity/centrality/typicality/investment) plus artist
+        diversity. See spec 2026-07-24-genre-mode-design.md.
 
         Args:
             genre_name: Name of the genre to create playlist for
@@ -2705,12 +2722,20 @@ class PlaylistGenerator:
             dynamic: Use dynamic mode (lower genre similarity threshold)
             dry_run: Preview mode (for testing)
             verbose: Enable verbose edge scoring output
-            cohesion_mode_override: Override cohesion mode (narrow/dynamic/discover/sonic_only)
+            cohesion_mode_override: Override cohesion mode (strict/narrow/dynamic/discover)
+            seed_epoch: Rotates each cluster's ranked pier candidates ("give me
+                another one") while staying reproducible per (genre, epoch).
 
         Returns:
             Playlist dictionary with tracks and metadata, or None if unable to create
         """
-        from src.genre.normalize_unified import normalize_genre_token
+        import re
+        import sqlite3
+
+        from src.analyze.popularity_runner import artist_prominence, popularity_cache_db_path
+        from src.playlist import genre_mode
+        from src.playlist.filtering import is_valid_duration
+        from src.playlist.pier_bridge.taxonomy_steering import get_taxonomy_steering
 
         if genre_name is None:
             genre_name = genre
@@ -2724,69 +2749,227 @@ class PlaylistGenerator:
         if random_seed is not None:
             self.config.config.setdefault("playlists", {}).setdefault("ds_pipeline", {})["random_seed"] = random_seed
 
-        # Normalize the genre name
-        normalized_genre = normalize_genre_token(genre_name)
-        if not normalized_genre:
-            logger.warning(f"Genre '{genre_name}' could not be normalized")
-            return None
-
-        logger.info(f"Creating playlist for genre: {genre_name} (normalized: {normalized_genre})")
-
-        # Get tracks matching this genre
-        genre_tracks = self.library.get_tracks_for_genre(normalized_genre, limit=1000)
-
-        if not genre_tracks:
-            # No exact matches - suggest alternatives
-            suggestions = self.library.suggest_similar_genres(normalized_genre, limit=10)
-            logger.warning(f"No tracks found for genre '{normalized_genre}'")
-            if suggestions:
-                logger.info(f"Did you mean one of these genres? {', '.join(suggestions)}")
-            return None
-
-        if len(genre_tracks) < 4:
-            logger.warning(f"Genre '{normalized_genre}' has only {len(genre_tracks)} tracks, need at least 4")
-            return None
-
-        logger.info(f"Found {len(genre_tracks)} tracks for genre '{normalized_genre}'")
-
-        # Add play count (0 for all, since we don't use history for genre mode)
-        for track in genre_tracks:
-            track['play_count'] = 0
-
-        # Select seed tracks (4 seeds for consistency with artist mode)
-        # Use deterministic selection based on random_seed from config
-        # Filter by duration before selecting (exclude short/long tracks)
-        from src.playlist.filtering import is_valid_duration
-        valid_tracks = [t for t in genre_tracks if is_valid_duration(t, min_seconds=47, max_seconds=720)]
-        valid_tracks = self._filter_title_excluded_tracks(
-            valid_tracks,
-            context="genre_seed_selection",
-        )
-        if len(valid_tracks) == 0:
-            raise ValueError(
-                f"Genre '{genre_name}' has no tracks after duration/title exclusions "
-                "(duration=47s-720s)"
-            )
-        if len(valid_tracks) < 10:
-            raise ValueError(
-                f"Genre '{genre_name}' has only {len(valid_tracks)} valid-duration tracks "
-                f"(minimum 10 required for playlist generation). "
-                f"Total tracks in genre: {len(genre_tracks)}"
-            )
-        if len(valid_tracks) < 4:
-            logger.warning(f"Genre has only {len(valid_tracks)} valid-duration tracks (requested 4); using all valid tracks")
-
-        import random
+        gp_cfg = self.config.get("playlists", "genre_playlist", default={}) or {}
         ds_cfg = self.config.get('playlists', 'ds_pipeline', default={}) or {}
-        random_seed = ds_cfg.get('random_seed', 0)
-        rng = random.Random(random_seed)
-        seed_count = min(4, len(valid_tracks))
-        seed_tracks = rng.sample(valid_tracks, seed_count)
+        db_path = resolve_database_path(self.config)
 
-        seed_info = [f"{t.get('artist')} - {t.get('title')}" for t in seed_tracks]
-        logger.info(f"Seeds ({len(seed_tracks)}): {', '.join(seed_info[:3])}{'...' if len(seed_info) > 3 else ''}")
+        # --- Resolution + bridge-pool relaxation (spec §3.1, §3.5) ---
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            resolution = genre_mode.resolve_genre_query(conn, genre_name)
+            if resolution is None:
+                logger.warning(
+                    "Genre '%s' did not resolve to a canonical taxonomy genre.", genre_name
+                )
+                return None
+            logger.info(
+                "Creating playlist for genre: %s (canonical: %s / %s)",
+                genre_name, resolution.name, resolution.genre_id,
+            )
 
-        # Prepare recency data (scrobbles for filtering)
+            seed_member_ids = genre_mode.seed_member_track_ids(conn, resolution.genre_id)
+            if len(seed_member_ids) < 4:
+                logger.warning(
+                    "Genre '%s' has only %d published tracks; need at least 4.",
+                    resolution.name, len(seed_member_ids),
+                )
+                return None
+
+            steering = get_taxonomy_steering()
+            threshold = self._genre_pool_threshold(gp_cfg, cohesion_mode_override)
+            pool_ids, _sims, threshold_used = genre_mode.resolve_pool_with_relaxation(
+                conn, steering, resolution.genre_id, resolution.name,
+                start_threshold=threshold,
+                steps=gp_cfg.get("relaxation_steps", [0.35, 0.20, 0.10]),
+                min_tracks=max(int(track_count) * 8, 200),
+            )
+        finally:
+            conn.close()
+
+        # --- Load the sonic artifact bundle (same accessor artist mode uses) ---
+        artifact_path = ds_cfg.get("artifact_path")
+        if not artifact_path:
+            raise ValueError(
+                "playlists.ds_pipeline.artifact_path is not configured; genre mode "
+                "requires the sonic artifact to cluster and score seeds."
+            )
+        bundle = load_artifact_bundle(artifact_path)
+        index_by_track_id = {str(t): i for i, t in enumerate(bundle.track_ids)}
+        member_indices = [
+            index_by_track_id[t] for t in seed_member_ids if t in index_by_track_id
+        ]
+        if len(member_indices) < 4:
+            logger.warning(
+                "Genre '%s': only %d of %d published tracks are in the artifact; "
+                "cannot seed.", resolution.name, len(member_indices), len(seed_member_ids),
+            )
+            return None
+
+        # --- Cluster the genre's exact members across artists (spec §3.2) ---
+        style_cfg_raw = ds_cfg.get("artist_style", {}) or {}
+        style_cfg = ArtistStyleConfig(
+            enabled=bool(style_cfg_raw.get("enabled", False)),
+            cluster_k_min=style_cfg_raw.get("cluster_k_min", 3),
+            cluster_k_max=style_cfg_raw.get("cluster_k_max", 6),
+            cluster_k_heuristic_enabled=style_cfg_raw.get("cluster_k_heuristic_enabled", True),
+            piers_per_cluster=style_cfg_raw.get("piers_per_cluster", 1),
+            internal_connector_priority=style_cfg_raw.get("internal_connector_priority", True),
+            internal_connector_max_per_segment=style_cfg_raw.get("internal_connector_max_per_segment", 2),
+            bridge_floor_strict=style_cfg_raw.get("bridge_floor", {}).get("strict", 0.10),
+            bridge_floor_narrow=style_cfg_raw.get("bridge_floor", {}).get("narrow", 0.05),
+            bridge_floor_dynamic=style_cfg_raw.get("bridge_floor", {}).get("dynamic", 0.02),
+            bridge_weight=style_cfg_raw.get("bridge_score_weights", {}).get("bridge", 0.7),
+            transition_weight=style_cfg_raw.get("bridge_score_weights", {}).get("transition", 0.3),
+            genre_tiebreak_weight=style_cfg_raw.get("genre_tiebreak_weight", 0.05),
+            genre_neighbor_pool_enabled=bool(style_cfg_raw.get("genre_neighbor_pool_enabled", False)),
+            genre_neighbor_pool_size=int(style_cfg_raw.get("genre_neighbor_pool_size", 500)),
+            genre_neighbor_min_similarity=float(style_cfg_raw.get("genre_neighbor_min_similarity", 0.25)),
+            genre_neighbor_min_confidence=(
+                None
+                if style_cfg_raw.get("genre_neighbor_min_confidence") is None
+                else float(style_cfg_raw.get("genre_neighbor_min_confidence", 0.50))
+            ),
+            genre_neighbor_compatible_threshold=float(style_cfg_raw.get("genre_neighbor_compatible_threshold", 0.35)),
+            genre_neighbor_conflict_threshold=float(style_cfg_raw.get("genre_neighbor_conflict_threshold", 0.15)),
+            medoid_energy_weight=float(style_cfg_raw.get("medoid_energy_weight", 0.0)),
+            energy_feature=str(style_cfg_raw.get("energy_feature", "arousal_p50")),
+            energy_slot_lo_pct=float(style_cfg_raw.get("energy_slot_lo_pct", 10.0)),
+            energy_slot_hi_pct=float(style_cfg_raw.get("energy_slot_hi_pct", 90.0)),
+            dedupe_versions=bool(style_cfg_raw.get("dedupe_versions", True)),
+            medoid_popularity_weight=float(style_cfg_raw.get("medoid_popularity_weight", 0.0)),
+            pier_bridgeability_enabled=bool(style_cfg_raw.get("pier_bridgeability_enabled", True)),
+            pier_bridgeability_floor_t=float(style_cfg_raw.get("pier_bridgeability_floor_t", 0.30)),
+            pier_bridgeability_k=int(style_cfg_raw.get("pier_bridgeability_k", 10)),
+            pier_bridgeability_genre_floor=float(style_cfg_raw.get("pier_bridgeability_genre_floor", 0.30)),
+            pier_support_enabled=bool(style_cfg_raw.get("pier_support_enabled", True)),
+            pier_support_k=int(style_cfg_raw.get("pier_support_k", 10)),
+            pier_support_demotion_strength=float(style_cfg_raw.get("pier_support_demotion_strength", 1.0)),
+            pier_support_floor=float(style_cfg_raw.get("pier_support_floor", 0.50)),
+            pier_support_terminal_avoidance=bool(style_cfg_raw.get("pier_support_terminal_avoidance", True)),
+        )
+
+        # Calculate medoid_top_k based on presence setting (max_artist_fraction),
+        # same as the artist-mode call site (playlist_generator.py ~3145).
+        max_artist_fraction = ds_cfg.get("candidate_pool", {}).get("max_artist_fraction", 0.125)
+        target_pier_count = max(3, round(track_count * max_artist_fraction))
+
+        # medoid_top_k > 1 gives several ranked candidates per cluster so the genre
+        # composite score has something to choose between.
+        clusters, medoids, medoids_by_cluster, X_norm, support_by_index = cluster_artist_tracks(
+            bundle=bundle,
+            artist_name=f"[genre:{resolution.genre_id}]",   # log label only
+            cfg=style_cfg,
+            random_seed=int(ds_cfg.get("random_seed", 0) or 0),
+            member_indices=member_indices,
+            medoid_top_k=8,
+            target_pier_count=target_pier_count,
+            metadata_db_path=db_path,
+        )
+
+        # --- Pier-bridgeability veto (spec §3.4, mechanism 1) ---
+        # ALREADY APPLIED: cluster_artist_tracks runs the veto on medoid candidacy
+        # internally (artist_style.py:910-972) using the member set we passed, so
+        # medoids_by_cluster is the bridgeability-filtered candidate list. Do NOT
+        # recompute it here — one veto, one place.
+        X_raw = bundle.X_sonic
+        candidate_lists = [
+            list(cands)
+            for cluster, cands in zip(clusters, medoids_by_cluster)
+            if len(cluster) >= int(gp_cfg.get("min_cluster_size", 3)) and len(cands) > 0
+        ]
+        logger.info(
+            "stage=genre_seeds | clusters=%d eligible_after_min_size_and_veto=%d",
+            len(clusters), len(candidate_lists),
+        )
+
+        # --- Composite seed score (spec §3.2) ---
+        artist_key_by_index = {i: str(bundle.artist_keys[i]) for i in member_indices}
+        prominence = artist_prominence(
+            popularity_cache_db_path(), set(artist_key_by_index.values())
+        )
+        investment_counts: Dict[str, int] = {}
+        for ak in artist_key_by_index.values():
+            investment_counts[ak] = investment_counts.get(ak, 0) + 1
+        max_owned = max(investment_counts.values()) if investment_counts else 1
+        investment = {k: v / max_owned for k, v in investment_counts.items()}
+
+        canonicity = genre_mode.canonicity_by_index(
+            bundle, member_indices, popularity_cache_db_path()
+        )
+        centrality = genre_mode.centrality_by_index(
+            db_path, bundle, member_indices, resolution.genre_id
+        )
+        typicality = genre_mode.sonic_typicality(X_raw, member_indices)
+
+        weights = genre_mode.SeedWeights(
+            prominence=float(gp_cfg.get("seed_weight_prominence", 1.0)),
+            canonicity=float(gp_cfg.get("seed_weight_canonicity", 0.5)),
+            centrality=float(gp_cfg.get("seed_weight_centrality", 0.75)),
+            typicality=float(gp_cfg.get("seed_weight_typicality", 0.75)),
+            investment=float(gp_cfg.get("seed_weight_investment", 0.15)),
+        )
+        scores = genre_mode.score_seed_candidates(
+            member_indices,
+            artist_keys=artist_key_by_index,
+            prominence_by_artist=prominence,
+            canonicity_by_index=canonicity,
+            centrality_by_index=centrality,
+            typicality_by_index=typicality,
+            investment_by_artist=investment,
+            weights=weights,
+        )
+
+        # min_cluster_size and the veto were both applied when building
+        # candidate_lists above, so they are neutral here.
+        pier_indices = genre_mode.select_piers_from_clusters(
+            candidate_lists, scores, artist_key_by_index,
+            min_cluster_size=1,
+            bridgeable=None,
+            epoch=int(seed_epoch or 0),
+        )
+        # Same title-exclusion guard artist mode applies to its piers
+        # (playlist_generator.py:3194) — an "Intro"/"Interlude"/"Skit"-flagged
+        # track must never seat as a pier here either.
+        pier_indices = self._filter_title_excluded_bundle_indices(
+            bundle, pier_indices, context="genre_pier_selection",
+        )
+        if len(pier_indices) < 2:
+            logger.warning(
+                "Genre '%s': only %d eligible piers after clustering + veto.",
+                resolution.name, len(pier_indices),
+            )
+            return None
+
+        pier_track_ids = [str(bundle.track_ids[i]) for i in pier_indices]
+        seed_tracks = self.library.get_tracks_by_ids(pier_track_ids)
+        if len(seed_tracks) < 2:
+            logger.warning(
+                "Genre '%s': only %d/%d piers resolved in the library after id lookup.",
+                resolution.name, len(seed_tracks), len(pier_track_ids),
+            )
+            return None
+        for t in seed_tracks:
+            t['play_count'] = 0
+
+        pier_index_by_id = {tid: i for i, tid in zip(pier_indices, pier_track_ids)}
+        for t in seed_tracks:
+            i = pier_index_by_id.get(str(t.get("rating_key")))
+            logger.info(
+                "stage=genre_seeds | pier idx=%s score=%.3f artist=%s title=%s",
+                i, scores.get(i, 0.0) if i is not None else 0.0,
+                t.get("artist"), t.get("title"),
+            )
+
+        # --- DS candidate pool: the relaxed bridge pool, duration/title-filtered ---
+        pool_track_dicts = self.library.get_tracks_by_ids(list(pool_ids))
+        pool_track_dicts = [
+            t for t in pool_track_dicts if is_valid_duration(t, min_seconds=47, max_seconds=720)
+        ]
+        pool_track_dicts = self._filter_title_excluded_tracks(
+            pool_track_dicts,
+            context="genre_pool_candidates",
+        )
+
         scrobbles: List[Dict[str, Any]] = []
         if self.lastfm:
             try:
@@ -2794,23 +2977,27 @@ class PlaylistGenerator:
             except Exception as exc:
                 logger.warning("Last.FM scrobble fetch failed; skipping scrobble recency filter (%s)", exc, exc_info=True)
 
-        # DS scope: use genre tracks as candidate pool (not entire library)
-        # IMPORTANT: Use valid_tracks (duration-filtered) not genre_tracks (unfiltered)
-        ds_candidates = valid_tracks
-        excluded_ids = set()
-
+        excluded_ids: Set[str] = set()
         if scrobbles:
             excluded_ids = self._compute_excluded_from_scrobbles(
-                ds_candidates,
+                pool_track_dicts,
                 scrobbles,
                 lookback_days=self.config.recently_played_lookback_days,
                 seed_id=seed_tracks[0].get('rating_key') if seed_tracks else None,
             )
-            logger.info(f"stage=candidate_pool | Last.fm recency exclusions: before={len(ds_candidates)} after={len(ds_candidates) - len(excluded_ids)} excluded={len(excluded_ids)}")
+            logger.info(
+                "stage=candidate_pool | Last.fm recency exclusions: before=%d after=%d excluded=%d",
+                len(pool_track_dicts), len(pool_track_dicts) - len(excluded_ids), len(excluded_ids),
+            )
 
-        allowed_track_ids = [t.get("rating_key") for t in ds_candidates if t.get("rating_key") and str(t.get("rating_key")) not in excluded_ids]
+        allowed_track_ids = [
+            t.get("rating_key") for t in pool_track_dicts
+            if t.get("rating_key") and str(t.get("rating_key")) not in excluded_ids
+        ]
 
-        logger.info(f"DS scope: genre (allowed_ids={len(allowed_track_ids)})")
+        logger.info(
+            "DS scope: genre (threshold=%.3f allowed_ids=%d)", threshold_used, len(allowed_track_ids)
+        )
 
         # Determine cohesion mode
         playlists_cfg = self.config.config.get("playlists", {}) or {}
@@ -2818,8 +3005,6 @@ class PlaylistGenerator:
 
         logger.info(f"Running pipeline with mode={cohesion_mode_effective}")
 
-        # Genre mode doesn't use artist_style clustering (no single artist to cluster)
-        # But we still use pier-bridge with the genre seeds as piers
         style_seed_track_id = seed_tracks[0].get('rating_key') if seed_tracks else None
         anchor_seed_ids = [s.get('rating_key') for s in seed_tracks if s.get('rating_key')]
 
@@ -2827,7 +3012,6 @@ class PlaylistGenerator:
         # Note: Pier-bridge may drop 1-2 tracks for cross-segment gap enforcement (quality control)
         # Accept results within tolerance rather than requiring exact match
         ds_tracks = None
-        import re
 
         try:
             ds_tracks = self._maybe_generate_ds_playlist(
@@ -2838,13 +3022,14 @@ class PlaylistGenerator:
                 excluded_track_ids=excluded_ids,
                 anchor_seed_tracks=seed_tracks,  # Pass full seed track info
                 anchor_seed_ids=anchor_seed_ids,
-                artist_style_enabled=False,  # No artist clustering for genre mode
+                artist_style_enabled=False,  # No artist clustering inside the DS call itself
                 artist_playlist=False,  # Genre mode, not artist mode
-                pool_source="library",
+                pool_source="genre_mode",
                 dry_run=bool(dry_run),
                 audit_context_extra={
-                    "genre": normalized_genre,
+                    "genre": resolution.genre_id,
                     "seed_mode": "genre",
+                    "threshold": threshold_used,
                 },
                 internal_connector_ids=None,
                 internal_connector_max_per_segment=0,
@@ -2862,7 +3047,7 @@ class PlaylistGenerator:
 
                     if actual_length < min_acceptable:
                         logger.error(
-                            f"Genre '{normalized_genre}' candidate pool too small: "
+                            f"Genre '{resolution.name}' candidate pool too small: "
                             f"got {actual_length} tracks (minimum {min_acceptable}). "
                             f"Try --ds-mode dynamic or discover for larger pool."
                         )
@@ -2884,11 +3069,12 @@ class PlaylistGenerator:
                             anchor_seed_ids=anchor_seed_ids,
                             artist_style_enabled=False,
                             artist_playlist=False,
-                            pool_source="library",
+                            pool_source="genre_mode",
                             dry_run=bool(dry_run),
                             audit_context_extra={
-                                "genre": normalized_genre,
+                                "genre": resolution.genre_id,
                                 "seed_mode": "genre",
+                                "threshold": threshold_used,
                                 "adjusted_target": True,
                             },
                             internal_connector_ids=None,
@@ -2897,7 +3083,7 @@ class PlaylistGenerator:
                         )
                     else:
                         logger.error(
-                            f"Genre '{normalized_genre}': Pier-bridge produced {actual_length} tracks "
+                            f"Genre '{resolution.name}': Pier-bridge produced {actual_length} tracks "
                             f"(target {track_count}, tolerance {tolerance}). "
                             f"Try --ds-mode dynamic or reduce --tracks to {actual_length}."
                         )
@@ -2908,22 +3094,22 @@ class PlaylistGenerator:
                 raise  # Not a length mismatch error, re-raise
 
         if not ds_tracks:
-            logger.warning(f"DS pipeline returned no tracks for genre '{normalized_genre}'")
+            logger.warning(f"DS pipeline returned no tracks for genre '{resolution.name}'")
             return None
 
         final_tracks = ds_tracks
 
-        logger.info(f"Generated {len(final_tracks)} tracks for genre '{normalized_genre}'")
+        logger.info(f"Generated {len(final_tracks)} tracks for genre '{resolution.name}'")
 
         # Print summary
-        title = f"Auto: {normalized_genre.title()}"
+        title = f"Auto: {resolution.name.title()}"
         self._print_playlist_report(final_tracks, artist_name=None, dynamic=dynamic, verbose_edges=verbose)
 
         return {
             'title': title,
             'name': title,
             'artists': tuple(set(t.get('artist') for t in final_tracks if t.get('artist'))),
-            'genres': [normalized_genre],
+            'genres': [resolution.name],
             'tracks': final_tracks,
             'track_ids': [str(t.get('rating_key') or t.get('track_id') or '') for t in final_tracks],
             'ds_report': getattr(self, "_last_ds_report", None),
