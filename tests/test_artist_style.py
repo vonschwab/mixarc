@@ -1625,3 +1625,30 @@ def test_member_indices_none_is_unchanged(monkeypatch):
     cfg = art.ArtistStyleConfig(pier_bridgeability_enabled=False, dedupe_versions=False)
     art.cluster_artist_tracks(bundle=bundle, artist_name="Test Artist", cfg=cfg)
     assert seen["name"] == "Test Artist"
+
+
+def test_member_indices_bridgeability_excludes_member_set_not_artist_name(monkeypatch):
+    """The pier-bridgeability veto must exclude the caller-supplied member set,
+    not re-derive from artist_name. In genre mode artist_name is a label like
+    "[genre:shoegaze]" that matches no real artist key -- re-deriving from it
+    silently returns [], which lets a track look bridgeable purely via its own
+    (unexcluded) album-mates."""
+    import src.playlist.artist_style as art
+
+    real_compute = art.compute_pier_bridgeability
+    captured = {}
+
+    def _spy(X_norm, member_indices_arg, excluded_indices, k, **kwargs):
+        captured["excluded"] = sorted(int(i) for i in excluded_indices)
+        return real_compute(X_norm, member_indices_arg, excluded_indices, k, **kwargs)
+
+    monkeypatch.setattr(art, "compute_pier_bridgeability", _spy)
+
+    bundle = _member_indices_fixture()
+    cfg = art.ArtistStyleConfig(pier_bridgeability_enabled=True, dedupe_versions=False)
+    art.cluster_artist_tracks(
+        bundle=bundle, artist_name="[genre:test]", cfg=cfg,
+        member_indices=[0, 1, 2, 3, 4, 5], target_pier_count=2,
+    )
+    assert "excluded" in captured, "compute_pier_bridgeability was never called"
+    assert captured["excluded"] == [0, 1, 2, 3, 4, 5]

@@ -838,8 +838,10 @@ def cluster_artist_tracks(
     X_norm = X_raw / (np.linalg.norm(X_raw, axis=1, keepdims=True) + 1e-12)
     if member_indices is not None:
         # Genre mode: the caller supplies a cross-artist index set (spec §3.2).
-        # artist_name degrades to a log label. Everything below this point is
-        # artist-agnostic — it operates on the index list only.
+        # artist_name degrades to a log label. Most of what follows operates on
+        # the index list only and is artist-agnostic -- but the pier-bridgeability
+        # exclusion set below is routed through member_indices explicitly (not
+        # re-derived from artist_name), since a label matches no real artist key.
         artist_indices = [int(i) for i in member_indices]
         logger.info(
             "Clustering scope: caller-supplied member set (label=%s) n=%d",
@@ -912,9 +914,16 @@ def cluster_artist_tracks(
         _cal_c, _cal_s, _cal_g = resolve_transition_calib(
             getattr(bundle, "sonic_variant", None)
         )
-        _excl_cols = _artist_indices_in_bundle(
-            bundle, artist_name, include_collaborations=True
-        )
+        if member_indices is not None:
+            # Genre mode: exclude the caller's own member set. Re-deriving from
+            # artist_name would return [] (the label matches no artist key), which
+            # silently removes the veto's self-exclusion and lets a track look
+            # bridgeable via its own album-mates.
+            _excl_cols = artist_indices
+        else:
+            _excl_cols = _artist_indices_in_bundle(
+                bundle, artist_name, include_collaborations=True
+            )
         _xg = getattr(bundle, "X_genre_smoothed", None)
         _genre_mask = seed_genre_relevance_mask(
             _xg, artist_indices, cfg.pier_bridgeability_genre_floor,
