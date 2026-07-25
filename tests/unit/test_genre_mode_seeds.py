@@ -65,6 +65,7 @@ def test_zero_weight_signal_has_no_effect():
         indices=[0, 1], artist_keys={0: "a", 1: "b"},
         prominence_by_artist={"a": 1.0, "b": 0.0},
         canonicity_by_index={0: 1.0, 1: 1.0}, centrality_by_index={0: 1.0, 1: 1.0},
+        typicality_by_index={0: 1.0, 1: 1.0},
         investment_by_artist={}, weights=w)
     assert a[0] == pytest.approx(a[1])
 
@@ -134,3 +135,18 @@ def test_epoch_zero_picks_the_top_scorer():
         bridgeable=None, epoch=0,
     )
     assert piers == [0]
+
+
+def test_epoch_preserves_cluster_priority_by_true_best_score():
+    """A strong cluster must claim its artist first even when epoch rotates each
+    cluster's candidate list — priority follows the cluster's true best score,
+    not whichever candidate rotation happened to put first."""
+    piers = select_piers_from_clusters(
+        clusters=[[10, 11], [20, 21]],
+        scores={10: 0.9, 11: 0.1, 20: 0.5, 21: 0.45},
+        artist_keys={10: "a", 11: "b", 20: "c", 21: "b"},
+        min_cluster_size=1, bridgeable=None, epoch=1,
+    )
+    # Cluster A (true best 0.9) goes first, takes 11 (artist b). Cluster B then
+    # finds its rotated head 21 is artist b (taken) and falls through to 20.
+    assert piers == [11, 20]

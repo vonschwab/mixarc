@@ -149,18 +149,19 @@ def score_seed_candidates(
     prominence_by_artist: dict,
     canonicity_by_index: dict,
     centrality_by_index: dict,
+    typicality_by_index: dict,
     investment_by_artist: dict,
     weights: SeedWeights,
-    typicality_by_index: Optional[dict] = None,
 ) -> dict:
     """Composite seed score per bundle index. Higher is a better pier.
 
     Missing prominence means UNCACHED, scored at the neutral midpoint. Missing
     canonicity/centrality/typicality/investment mean genuinely absent and score 0.0.
-    ``typicality_by_index`` itself is optional (defaults to empty) since not every
-    caller computes sonic typicality.
+    ``typicality_by_index`` is a required argument (not defaulted): a caller that
+    forgets it must fail loudly, not silently zero out the 0.75-weighted
+    typicality term for every candidate — a configured signal that can't act is a
+    bug, not a no-op (see CLAUDE.md "Activate fixes; never default to legacy").
     """
-    typ_by_index = typicality_by_index or {}
     out: dict = {}
     for i in indices:
         i = int(i)
@@ -170,7 +171,7 @@ def score_seed_candidates(
             weights.prominence * float(prom)
             + weights.canonicity * float(canonicity_by_index.get(i, 0.0))
             + weights.centrality * float(centrality_by_index.get(i, 0.0))
-            + weights.typicality * float(typ_by_index.get(i, 0.0))
+            + weights.typicality * float(typicality_by_index.get(i, 0.0))
             + weights.investment * float(investment_by_artist.get(ak, 0.0))
         )
     return out
@@ -197,7 +198,11 @@ def select_piers_from_clusters(
 
     ``epoch`` rotates each cluster's ranked candidates so "give me another one" yields
     a different playlist while staying reproducible: selection is a pure function of
-    (genre, epoch). epoch=0 picks each cluster's top scorer. Spec §3.7 option (C).
+    (genre, epoch). epoch=0 picks each cluster's top scorer. Rotation only changes
+    which candidate a cluster offers first; it does not change cluster VISIT order —
+    that always follows each cluster's true best score, computed before rotation, so
+    a strong cluster still claims its artist before a weaker one regardless of epoch.
+    Spec §3.7 option (C).
     """
     eligible = []
     for cluster in clusters:
@@ -208,15 +213,16 @@ def select_piers_from_clusters(
         if not members:
             continue
         members.sort(key=lambda i: (-float(scores.get(i, 0.0)), i))
+        best = float(scores.get(members[0], 0.0))  # true best, BEFORE rotation
         if epoch:
             offset = int(epoch) % len(members)
             members = members[offset:] + members[:offset]
-        eligible.append(members)
-    eligible.sort(key=lambda m: -float(scores.get(m[0], 0.0)))
+        eligible.append((best, members))
+    eligible.sort(key=lambda t: -t[0])
 
     used_artists: set = set()
     piers: list = []
-    for members in eligible:
+    for _best, members in eligible:
         for i in members:
             ak = str(artist_keys.get(i, ""))
             if ak and ak in used_artists:
