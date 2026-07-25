@@ -819,6 +819,7 @@ def cluster_artist_tracks(
     sonic_tag_weight: float = 0.0,
     target_pier_count: Optional[int] = None,
     restrict_to_track_ids: Optional[set[str]] = None,
+    member_indices: Optional[List[int]] = None,
 ) -> Tuple[List[List[int]], List[int], List[List[int]], np.ndarray, Dict[int, float]]:
     """Cluster artist tracks in sonic space and return clusters + medoids.
 
@@ -835,9 +836,19 @@ def cluster_artist_tracks(
     if X_raw is None:
         raise ValueError("Artifact missing X_sonic for clustering.")
     X_norm = X_raw / (np.linalg.norm(X_raw, axis=1, keepdims=True) + 1e-12)
-    artist_indices = _artist_indices_in_bundle(
-        bundle, artist_name, include_collaborations=include_collaborations
-    )
+    if member_indices is not None:
+        # Genre mode: the caller supplies a cross-artist index set (spec §3.2).
+        # artist_name degrades to a log label. Everything below this point is
+        # artist-agnostic — it operates on the index list only.
+        artist_indices = [int(i) for i in member_indices]
+        logger.info(
+            "Clustering scope: caller-supplied member set (label=%s) n=%d",
+            artist_name, len(artist_indices),
+        )
+    else:
+        artist_indices = _artist_indices_in_bundle(
+            bundle, artist_name, include_collaborations=include_collaborations
+        )
     if excluded_track_ids:
         before = len(artist_indices)
         excluded_ids = {str(tid) for tid in excluded_track_ids}
