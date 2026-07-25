@@ -2749,6 +2749,18 @@ class PlaylistGenerator:
         if random_seed is not None:
             self.config.config.setdefault("playlists", {}).setdefault("ds_pipeline", {})["random_seed"] = random_seed
 
+        # Resolve the effective cohesion mode ONCE, before anything derived from it
+        # (the bridge-pool threshold below, and the DS/beam mode_override further
+        # down) so the pool and the beam always agree. cohesion_mode_override is
+        # None on a plain `--genre` CLI call with no `--cohesion-mode` flag, in
+        # which case this falls back to the persisted playlists.cohesion_mode —
+        # computing this fresh a second time later (from the raw override alone)
+        # would silently re-diverge from that fallback for every non-dynamic
+        # config, which is exactly the "configured knob that can't act" failure
+        # mode this project treats as a bug, not a nit.
+        playlists_cfg = self.config.config.get("playlists", {}) or {}
+        cohesion_mode_effective = cohesion_mode_override or ("dynamic" if dynamic else resolve_cohesion_mode(playlists_cfg))
+
         gp_cfg = self.config.get("playlists", "genre_playlist", default={}) or {}
         ds_cfg = self.config.get('playlists', 'ds_pipeline', default={}) or {}
         db_path = resolve_database_path(self.config)
@@ -2776,7 +2788,7 @@ class PlaylistGenerator:
                 return None
 
             steering = get_taxonomy_steering()
-            threshold = self._genre_pool_threshold(gp_cfg, cohesion_mode_override)
+            threshold = self._genre_pool_threshold(gp_cfg, cohesion_mode_effective)
             pool_ids, _sims, threshold_used = genre_mode.resolve_pool_with_relaxation(
                 conn, steering, resolution.genre_id, resolution.name,
                 start_threshold=threshold,
@@ -2999,10 +3011,8 @@ class PlaylistGenerator:
             "DS scope: genre (threshold=%.3f allowed_ids=%d)", threshold_used, len(allowed_track_ids)
         )
 
-        # Determine cohesion mode
-        playlists_cfg = self.config.config.get("playlists", {}) or {}
-        cohesion_mode_effective = cohesion_mode_override or ("dynamic" if dynamic else resolve_cohesion_mode(playlists_cfg))
-
+        # cohesion_mode_effective was already resolved near the top of this method
+        # (before the pool threshold was computed) so the pool and the beam agree.
         logger.info(f"Running pipeline with mode={cohesion_mode_effective}")
 
         style_seed_track_id = seed_tracks[0].get('rating_key') if seed_tracks else None

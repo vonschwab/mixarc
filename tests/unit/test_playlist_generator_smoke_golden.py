@@ -370,3 +370,64 @@ def test_playlist_generator_smoke_golden(scenario_name, smoke_generator, request
         f"[{scenario_name}] track_count changed: "
         f"{snapshot['track_count']} vs {expected['track_count']}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Regression: the genre bridge-pool threshold must be computed from the SAME
+# effective cohesion mode the beam later runs with — not from the raw
+# cohesion_mode_override parameter, which is None on a plain `--genre` CLI
+# call with no `--cohesion-mode` flag. Before the fix, a None override made
+# _genre_pool_threshold silently default to 'dynamic' (0.35) regardless of
+# what playlists.cohesion_mode in config.yaml actually resolved to for the
+# beam (e.g. 'strict', 0.50) — a configured knob that couldn't act. Pin it
+# with a NON-dynamic configured mode: a dynamic-only test would pass by
+# coincidence and reproduce the exact blind spot that let this ship.
+# ---------------------------------------------------------------------------
+
+
+class _CapturedThreshold(Exception):
+    """Raised by the resolve_pool_with_relaxation stub once it has recorded
+    the threshold it was called with, to short-circuit the rest of
+    create_playlist_for_genre (artifact loading, clustering, etc.) — this
+    test only needs to observe one call argument, not run a full generation.
+    """
+
+
+@pytest.mark.parametrize(
+    "configured_mode, expected_threshold",
+    [
+        ("strict", 0.50),
+        ("narrow", 0.42),
+    ],
+)
+def test_genre_pool_threshold_matches_effective_cohesion_mode(
+    monkeypatch, smoke_generator, configured_mode, expected_threshold
+):
+    gen = smoke_generator
+    # cohesion_mode_override is left at its default (None) — the exact CLI
+    # shape that hid the bug (main_app.py passes None through with no
+    # --cohesion-mode flag). playlists.cohesion_mode is the only place a
+    # non-dynamic mode can come from in that case.
+    gen.config.config = {"playlists": {"cohesion_mode": configured_mode}}
+
+    captured: Dict[str, float] = {}
+
+    def _fake_resolve_pool_with_relaxation(
+        conn, steering, genre_id, genre_name, *, start_threshold, steps, min_tracks
+    ):
+        captured["start_threshold"] = start_threshold
+        raise _CapturedThreshold
+
+    monkeypatch.setattr(
+        "src.playlist.genre_mode.resolve_pool_with_relaxation",
+        _fake_resolve_pool_with_relaxation,
+    )
+
+    with pytest.raises(_CapturedThreshold):
+        gen.create_playlist_for_genre(genre_name="ambient", track_count=8)
+
+    assert captured["start_threshold"] == pytest.approx(expected_threshold), (
+        f"pool threshold used {captured['start_threshold']} but the beam's "
+        f"effective cohesion_mode is {configured_mode!r} (expected "
+        f"{expected_threshold}) — pool and beam disagree on cohesion mode"
+    )
