@@ -121,19 +121,30 @@ def is_facet(conn: sqlite3.Connection, genre_id: str) -> bool:
 def canonical_genre_search(
     conn: sqlite3.Connection, query: str, limit: int = 20
 ) -> list[tuple[str, str]]:
-    """Active canonical genres whose name contains ``query`` (case-insensitive).
+    """Active canonical genres matching ``query`` by canonical name OR alias.
 
-    Returns ``(genre_id, name)`` ordered most-specific first. Used by the genre
-    edit autocomplete so only real taxonomy genres can be added.
+    Returns ``(genre_id, canonical_name)`` — always the canonical name, even when
+    the hit came from an alias, so a pick is always a real taxonomy genre. Ordered
+    canonical-name matches first, then most-specific first. Deduped by genre_id.
     """
     q = (query or "").strip()
     if not q:
         return []
     rows = conn.execute(
-        "SELECT genre_id, name FROM genre_graph_canonical_genres "
-        "WHERE status = 'active' AND LOWER(name) LIKE '%' || LOWER(?) || '%' "
-        "ORDER BY specificity_score DESC, name ASC LIMIT ?",
-        (q, limit),
+        "SELECT g.genre_id, g.name, MIN(m.via_alias) AS via_alias "
+        "FROM ("
+        "  SELECT genre_id, 0 AS via_alias FROM genre_graph_canonical_genres "
+        "   WHERE LOWER(name) LIKE '%' || LOWER(?) || '%' "
+        "  UNION ALL "
+        "  SELECT canonical_genre_id AS genre_id, 1 AS via_alias FROM genre_graph_aliases "
+        "   WHERE LOWER(alias) LIKE '%' || LOWER(?) || '%' "
+        ") m "
+        "JOIN genre_graph_canonical_genres g ON g.genre_id = m.genre_id "
+        "WHERE g.status = 'active' "
+        "GROUP BY g.genre_id, g.name "
+        "ORDER BY via_alias ASC, g.specificity_score DESC, g.name ASC "
+        "LIMIT ?",
+        (q, q, limit),
     ).fetchall()
     return [(r[0], r[1]) for r in rows]
 
