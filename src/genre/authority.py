@@ -244,3 +244,32 @@ def on_tag_track_ids_for_artist(
     except sqlite3.OperationalError:
         return {}
     return {str(r[0]): int(r[1]) for r in rows}
+
+
+def track_ids_for_genre_ids(
+    conn: sqlite3.Connection,
+    genre_ids: set[str],
+    *,
+    layers: tuple[str, ...] = ("observed_leaf", "legacy"),
+) -> set[str]:
+    """Track ids whose album is published with ANY of ``genre_ids`` at ``layers``.
+
+    Union semantics. Returns an empty set for empty input or absent tables — callers
+    fall back rather than crash. THE authority path: joins tracks.album_id against
+    release_effective_genres, never a raw *_genres table.
+    """
+    gids = {str(g) for g in (genre_ids or set()) if str(g)}
+    if not gids:
+        return set()
+    gph = ",".join("?" for _ in gids)
+    lph = ",".join("?" for _ in layers)
+    try:
+        rows = conn.execute(
+            f"SELECT DISTINCT t.track_id FROM tracks t "
+            f"JOIN release_effective_genres reg ON reg.album_id = t.album_id "
+            f"WHERE reg.genre_id IN ({gph}) AND reg.assignment_layer IN ({lph})",
+            (*gids, *layers),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return set()
+    return {str(r[0]) for r in rows}
