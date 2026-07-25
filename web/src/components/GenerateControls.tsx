@@ -4,6 +4,7 @@ import { useInfiniteSearch } from "../lib/useInfiniteSearch";
 import { useLocalStorage } from "../lib/useLocalStorage";
 import type { FlowDial, GenerateRequestBody, Mode, PaceDial, RangeDial } from "../lib/types";
 import { StylePopover } from "./StylePopover";
+import { GenreAutocomplete } from "./GenreAutocomplete";
 import { btnPrimary } from "../lib/ui";
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -216,6 +217,9 @@ export function GenerateControls({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [seed, mode]);
 
+  // Shared visual style for the artist-name input and the genre autocomplete input.
+  const inputClassName = "w-full bg-well border border-border rounded text-xs text-text px-2.5 py-[3px]";
+
   function submit(epoch: number = seedEpoch) {
     const body: GenerateRequestBody = {
       mode,
@@ -267,8 +271,8 @@ export function GenerateControls({
           </select>
         </Cell>
 
-        {/* Text input: artist or genre mode */}
-        {(mode === "artist" || mode === "genre") && (
+        {/* Text input: artist mode — free-text with its own name autocomplete */}
+        {mode === "artist" && (
           <Cell className="flex-1 min-w-[220px]">
             <div ref={dropdownRef} className="relative w-full">
               <input
@@ -276,10 +280,10 @@ export function GenerateControls({
                 value={seed}
                 onChange={(e) => { selectedRef.current = null; setSeed(e.target.value); }}
                 onKeyDown={(e) => e.key === "Enter" && submit()}
-                placeholder={mode === "artist" ? "Artist name…" : "Genre…"}
-                className="w-full bg-well border border-border rounded text-xs text-text px-2.5 py-[3px]"
+                placeholder="Artist name…"
+                className={inputClassName}
               />
-              {mode === "artist" && artistSearch.items.length > 0 && (
+              {artistSearch.items.length > 0 && (
                 <ul
                   ref={listRef}
                   onScroll={() => {
@@ -305,6 +309,22 @@ export function GenerateControls({
                 </ul>
               )}
             </div>
+          </Cell>
+        )}
+
+        {/* Text input: genre mode — alias-aware canonical genre autocomplete
+            (picking a suggestion guarantees a real canonical name; see
+            GenreAutocomplete.tsx and /api/genres/search). */}
+        {mode === "genre" && (
+          <Cell className="flex-1 min-w-[220px]">
+            <GenreAutocomplete
+              data-testid="seed-input"
+              value={seed}
+              onChange={setSeed}
+              onPick={(name) => setSeed(name)}
+              placeholder="Genre…"
+              className={inputClassName}
+            />
           </Cell>
         )}
 

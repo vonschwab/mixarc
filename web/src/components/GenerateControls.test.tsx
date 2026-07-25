@@ -1,10 +1,11 @@
-import { describe, it, expect, afterEach } from "vitest";
-import { render, screen, fireEvent, cleanup } from "@testing-library/react";
+import { describe, it, expect, afterEach, vi } from "vitest";
+import { render, screen, fireEvent, cleanup, waitFor } from "@testing-library/react";
 import { GenerateControls } from "./GenerateControls";
+import { api } from "../lib/api";
 
-afterEach(() => { cleanup(); localStorage.clear(); });
+afterEach(() => { cleanup(); localStorage.clear(); vi.restoreAllMocks(); });
 
-function renderControls() {
+function renderControls(props: Partial<Parameters<typeof GenerateControls>[0]> = {}) {
   return render(
     <GenerateControls
       mode="artist"
@@ -13,6 +14,7 @@ function renderControls() {
       seedDisplays={[]}
       onSubmit={() => {}}
       busy={false}
+      {...props}
     />,
   );
 }
@@ -35,5 +37,22 @@ describe("GenerateControls disclosure", () => {
     fireEvent.click(toggle);
     expect(toggle.getAttribute("aria-expanded")).toBe("false");
     expect(screen.getByTestId("advanced-controls").className).toContain("@max-md:hidden");
+  });
+});
+
+describe("GenerateControls genre mode", () => {
+  it("shows genre autocomplete suggestions in genre mode", async () => {
+    vi.spyOn(api, "genresSearch").mockResolvedValue({
+      items: [{ genre_id: "shoegaze", name: "shoegaze" }],
+    });
+    renderControls({ mode: "genre" });
+    fireEvent.change(screen.getByPlaceholderText("Genre…"), { target: { value: "shoe" } });
+    await waitFor(() => expect(api.genresSearch).toHaveBeenCalled());
+    expect(await screen.findByText("shoegaze")).toBeTruthy();
+  });
+
+  it("hides the artist Style popover in genre mode", () => {
+    renderControls({ mode: "genre" });
+    expect(screen.queryByText(/style/i)).toBeNull();
   });
 });
