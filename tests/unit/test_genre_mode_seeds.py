@@ -242,6 +242,7 @@ def test_create_playlist_for_genre_passes_configured_pool_size_not_hardcoded_8(
     class _FakeBundle:
         track_ids = ["t0", "t1", "t2", "t3"]
         artist_keys = ["a0", "a1", "a2", "a3"]
+        durations_ms = [200_000, 200_000, 200_000, 200_000]
 
     class _FakeResolution:
         genre_id = "shoegaze"

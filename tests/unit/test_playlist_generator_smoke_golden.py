@@ -198,6 +198,10 @@ def smoke_generator(monkeypatch, tmp_path):
             # report) to split this fixture's 9 members into three clean
             # 3-member/one-artist-each clusters under the real k-means.
             return {"artifact_path": "synthetic-genre-bundle", "random_seed": 2}
+        if args[:2] == ("playlists", "min_track_duration_seconds"):
+            return kwargs.get("default", 46)
+        if args[:2] == ("playlists", "max_track_duration_seconds"):
+            return kwargs.get("default", 720)
         return {}
 
     gen.config.get.side_effect = _cfg_get

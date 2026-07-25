@@ -2810,6 +2810,22 @@ class PlaylistGenerator:
         member_indices = [
             index_by_track_id[t] for t in seed_member_ids if t in index_by_track_id
         ]
+        # Genre-mode piers are ALGORITHM-selected (unlike a user-supplied artist/
+        # seeds-mode seed, which keeps its duration exemption), so they must obey
+        # the same duration window the bridge pool enforces below — otherwise an
+        # outlier like a 77:42 DJ mix can seat as an anchor pier.
+        _min_dur = int(self.config.get("playlists", "min_track_duration_seconds", default=46))
+        _max_dur = int(self.config.get("playlists", "max_track_duration_seconds", default=720))
+        member_indices, _dur_removed = genre_mode.filter_member_indices_by_duration(
+            member_indices, bundle.durations_ms,
+            min_seconds=_min_dur, max_seconds=_max_dur,
+        )
+        if _dur_removed:
+            logger.info(
+                "stage=genre_seeds | duration filter removed %d/%d pier candidate(s) "
+                "outside [%ds, %ds]",
+                _dur_removed, _dur_removed + len(member_indices), _min_dur, _max_dur,
+            )
         if len(member_indices) < 4:
             logger.warning(
                 "Genre '%s': only %d of %d published tracks are in the artifact; "

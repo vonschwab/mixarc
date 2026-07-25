@@ -287,6 +287,37 @@ def centrality_by_index(
     }
 
 
+def filter_member_indices_by_duration(
+    member_indices, durations_ms, *, min_seconds: int, max_seconds: int
+) -> tuple:
+    """Drop pier candidates outside the configured duration window.
+
+    Genre-mode piers are ALGORITHM-selected, so unlike a user-supplied seed they
+    get no duration exemption — a 77-minute track must never become an anchor
+    (spec 2026-07-25-genre-mode-pass1-invariants.md §3).
+
+    A missing/zero duration means "unknown", not "invalid": those are kept, so
+    incomplete metadata cannot silently shrink the member set.
+
+    Returns ``(kept_indices, removed_count)``. Pure.
+    """
+    idx = [int(i) for i in member_indices]
+    if not idx:
+        return [], 0
+    lo_ms = float(min_seconds) * 1000.0
+    hi_ms = float(max_seconds) * 1000.0
+    kept = []
+    for i in idx:
+        try:
+            d = float(durations_ms[i])
+        except (IndexError, TypeError, ValueError):
+            kept.append(i)
+            continue
+        if d <= 0.0 or lo_ms <= d <= hi_ms:
+            kept.append(i)
+    return kept, len(idx) - len(kept)
+
+
 def select_piers_from_clusters(
     clusters,
     scores: dict,
