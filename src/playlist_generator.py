@@ -2926,6 +2926,12 @@ class PlaylistGenerator:
             medoid_top_k=seed_candidate_pool_size,
             target_pier_count=target_pier_count,
             metadata_db_path=db_path,
+            # The veto's neighbour set is the GENRE POOL, not the library. The
+            # default artist-scoped relevance mask is built from the member set's
+            # own genre profile, so album-tag contamination makes it admit the
+            # contaminants' neighbourhoods and certify them (spec §1.2). Measured
+            # on reggae: that mask passed 8941/43547 rows and vetoed 0 of 206.
+            bridgeability_eligible_mask=genre_mode.pool_membership_mask(bundle, pool_ids),
         )
 
         # --- Pier-bridgeability veto (spec §3.4, mechanism 1) ---

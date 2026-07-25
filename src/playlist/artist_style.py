@@ -820,6 +820,7 @@ def cluster_artist_tracks(
     target_pier_count: Optional[int] = None,
     restrict_to_track_ids: Optional[set[str]] = None,
     member_indices: Optional[List[int]] = None,
+    bridgeability_eligible_mask: Optional[np.ndarray] = None,
 ) -> Tuple[List[List[int]], List[int], List[List[int]], np.ndarray, Dict[int, float]]:
     """Cluster artist tracks in sonic space and return clusters + medoids.
 
@@ -924,23 +925,36 @@ def cluster_artist_tracks(
             _excl_cols = _artist_indices_in_bundle(
                 bundle, artist_name, include_collaborations=True
             )
-        _xg = getattr(bundle, "X_genre_smoothed", None)
-        _genre_mask = seed_genre_relevance_mask(
-            _xg, artist_indices, cfg.pier_bridgeability_genre_floor,
-        )
-        if _genre_mask is not None:
+        if bridgeability_eligible_mask is not None:
+            # Genre mode supplies its own neighbour set (the genre pool). The
+            # artist-scoped relevance mask is not merely unnecessary here — it is
+            # built by max-pooling the genre profile OF THE MEMBER SET, so a member
+            # set contaminated by album-level tags widens the mask to admit its own
+            # contaminants' neighbourhoods, which then certifies them as bridgeable.
+            # See spec 2026-07-25-genre-mode-pier-admission.md §1.2.
+            _genre_mask = bridgeability_eligible_mask
             logger.info(
-                "Pier bridgeability genre gate: %d/%d library rows eligible (genre_floor=%.2f)",
+                "Pier bridgeability: caller-supplied neighbour set, %d/%d rows eligible",
                 int(_genre_mask.sum()), int(_genre_mask.size),
-                float(cfg.pier_bridgeability_genre_floor),
             )
         else:
-            logger.warning(
-                "Pier bridgeability: genre-relevance gate inactive (%s) — falling back to "
-                "the ungated library-wide neighbor set.",
-                "X_genre_smoothed absent" if _xg is None
-                else "seed artist has no genre profile",
+            _xg = getattr(bundle, "X_genre_smoothed", None)
+            _genre_mask = seed_genre_relevance_mask(
+                _xg, artist_indices, cfg.pier_bridgeability_genre_floor,
             )
+            if _genre_mask is not None:
+                logger.info(
+                    "Pier bridgeability genre gate: %d/%d library rows eligible (genre_floor=%.2f)",
+                    int(_genre_mask.sum()), int(_genre_mask.size),
+                    float(cfg.pier_bridgeability_genre_floor),
+                )
+            else:
+                logger.warning(
+                    "Pier bridgeability: genre-relevance gate inactive (%s) — falling back to "
+                    "the ungated library-wide neighbor set.",
+                    "X_genre_smoothed absent" if _xg is None
+                    else "seed artist has no genre profile",
+                )
         _bt = compute_pier_bridgeability(
             X_norm, artist_indices, _excl_cols, cfg.pier_bridgeability_k,
             calib_center=_cal_c, calib_scale=_cal_s, calib_gain=_cal_g,

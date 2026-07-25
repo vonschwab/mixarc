@@ -287,6 +287,35 @@ def centrality_by_index(
     }
 
 
+def pool_membership_mask(bundle, pool_ids):
+    """Boolean mask over bundle rows: True where the track is in the genre pool.
+
+    Used as the pier-bridgeability neighbour set for genre mode, replacing the
+    artist-scoped genre relevance mask. That mask is built by max-pooling the genre
+    profile OF THE MEMBER SET, so when the member set is contaminated by album-level
+    tags it widens to admit the contaminants' own neighbourhoods and then certifies
+    them as bridgeable — the self-justifying loop in spec
+    2026-07-25-genre-mode-pier-admission.md §1.2.
+
+    With this mask the veto instead asks: "can this candidate reach k good
+    neighbours among the genre-adjacent pool, outside the exact-member set?"
+    """
+    import numpy as np
+
+    n = len(bundle.track_ids)
+    mask = np.zeros(n, dtype=bool)
+    # Prefer the bundle's own index when present, but don't require it — the map is
+    # an ArtifactBundle convenience, not part of the minimal contract this needs.
+    idx_of = getattr(bundle, "track_id_to_index", None)
+    if idx_of is None:
+        idx_of = {str(t): i for i, t in enumerate(bundle.track_ids)}
+    for tid in (pool_ids or ()):
+        i = idx_of.get(str(tid))
+        if i is not None:
+            mask[int(i)] = True
+    return mask
+
+
 def pool_genre_breakdown(conn: sqlite3.Connection, genre_ids) -> list:
     """``(genre_id, track_count)`` per contributing genre, most tracks first.
 
