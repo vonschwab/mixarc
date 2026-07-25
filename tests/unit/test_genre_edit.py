@@ -9,6 +9,10 @@ def _canon(conn):
         "genre_id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL, "
         "specificity_score REAL NOT NULL, status TEXT NOT NULL, taxonomy_version TEXT NOT NULL)"
     )
+    conn.execute(
+        "CREATE TABLE genre_graph_aliases ("
+        "alias TEXT, canonical_genre_id TEXT, source TEXT, confidence REAL)"
+    )
     conn.executemany(
         "INSERT INTO genre_graph_canonical_genres VALUES (?,?,?,?,?,?)",
         [("dream_pop", "Dream Pop", "genre", 0.8, "active", "v1"),
