@@ -820,6 +820,7 @@ class PlaylistGenerator:
             raise RuntimeError(f"DS pipeline artifact load failed ({exc})")
 
         self._last_ds_report = None
+        self._last_invariant_warnings: List[str] = []
 
         # Read genre similarity configuration
         playlists_cfg = self.config.config.get('playlists', {})
@@ -928,6 +929,15 @@ class PlaylistGenerator:
         )
 
         tracks: List[Dict[str, Any]] = []
+        # Hard-invariant warnings from post-order validation (Pass 1). Read from
+        # `stats` directly: the `ds_stats` line below reads `playlist_stats`, an
+        # attribute DSPipelineResult does not have, so it always yields {}.
+        # Pre-existing, unrelated to this feature — do not rely on it here.
+        try:
+            _pl_stats = (getattr(ds_result, "stats", {}) or {}).get("playlist") or {}
+            self._last_invariant_warnings = list(_pl_stats.get("invariant_warnings") or [])
+        except Exception:
+            self._last_invariant_warnings = []
         ds_stats = getattr(ds_result, "playlist_stats", {}) or {}
         playlist_stats_only = ds_stats.get("playlist") or {}
         pool_seed_sonic = (ds_stats.get("candidate_pool") or {}).get("seed_sonic_sim_track_ids") or {}
@@ -3146,6 +3156,10 @@ class PlaylistGenerator:
             'tracks': final_tracks,
             'track_ids': [str(t.get('rating_key') or t.get('track_id') or '') for t in final_tracks],
             'ds_report': getattr(self, "_last_ds_report", None),
+            # Hard-invariant breaches (artist gap / per-artist cap / pier ratio).
+            # The playlist is still returned — `degraded` tells the caller to say so.
+            'warnings': list(getattr(self, "_last_invariant_warnings", []) or []),
+            'degraded': bool(getattr(self, "_last_invariant_warnings", [])),
         }
 
     def _generate_playlist_title(self, artist1: str, artist2: str, genres: List[str]) -> str:

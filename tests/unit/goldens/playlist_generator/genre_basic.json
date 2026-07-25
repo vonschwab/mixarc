@@ -2,11 +2,13 @@
   "result": "dict",
   "top_keys": [
     "artists",
+    "degraded",
     "genres",
     "name",
     "title",
     "track_ids",
-    "tracks"
+    "tracks",
+    "warnings"
   ],
   "track_count": 8,
   "track_ids": [

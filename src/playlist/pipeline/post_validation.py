@@ -312,11 +312,19 @@ def run_post_order_validation(
         warnings.append(msg)
         logger.warning("post_order_validation: %s", msg)
 
-    if pier_ratio_target > 0.0 and ordered_track_ids:
+    # Always RECORD the pier ratio; only WARN when a target band is supplied.
+    # Callers currently pass no target: the obvious candidate, max_artist_fraction_final,
+    # is a per-artist cap fraction, not a pier-ratio target, and mini-piers legitimately
+    # add structural anchors beyond the derived base pier count — so comparing against it
+    # fires on nearly every run (measured: reggae 6 piers / 28 tracks = 0.214 vs 0.125).
+    # Recording it makes the ratio observable so a real band can be chosen from evidence
+    # rather than invented.
+    if ordered_track_ids:
         pier_hits = sum(1 for tid in ordered_track_ids if str(tid) in pier_ids_set)
         actual_ratio = pier_hits / float(len(ordered_track_ids))
+        summary["pier_count"] = int(pier_hits)
         summary["pier_ratio_milli"] = int(round(actual_ratio * 1000))
-        if abs(actual_ratio - pier_ratio_target) > pier_ratio_tolerance:
+        if pier_ratio_target > 0.0 and abs(actual_ratio - pier_ratio_target) > pier_ratio_tolerance:
             msg = (
                 f"pier_ratio_out_of_band: actual={actual_ratio:.3f} "
                 f"target={pier_ratio_target:.3f} tolerance={pier_ratio_tolerance:.3f}"
