@@ -101,3 +101,128 @@ def pool_track_ids(
         genre_id, float(threshold), len(sims), len(ids),
     )
     return ids, sims
+
+
+@dataclass(frozen=True)
+class SeedWeights:
+    """Composite seed-score weights (spec §3.2). Tunable via playlists.genre_playlist."""
+    prominence: float = 1.0
+    canonicity: float = 0.5
+    centrality: float = 0.75
+    typicality: float = 0.75
+    investment: float = 0.15
+
+
+def sonic_typicality(X_sonic, member_indices) -> dict:
+    """Bundle index -> how typical of THIS genre the track sounds, in [0, 1].
+
+    Cosine to the L2-normalized centroid of the genre's member vectors, rescaled
+    from [-1, 1]. Second of the two contextual oddball mechanisms in spec §3.4:
+    because it is measured against the chosen genre's own centroid, a Boards of
+    Canada interstitial is typical of ambient and survives there, while a
+    non-shoegaze-shaped intro scores low inside shoegaze. No global rule, so no
+    genre gets gutted (§5.1).
+    """
+    import numpy as np
+
+    idx = [int(i) for i in member_indices]
+    if not idx:
+        return {}
+    X = np.asarray(X_sonic, dtype=np.float64)[idx]
+    Xn = X / (np.linalg.norm(X, axis=1, keepdims=True) + 1e-12)
+    centroid = Xn.mean(axis=0)
+    centroid = centroid / (np.linalg.norm(centroid) + 1e-12)
+    cos = Xn @ centroid
+    return {i: float((c + 1.0) / 2.0) for i, c in zip(idx, cos)}
+
+
+# Prominence assumed for an artist absent from the Last.fm cache. Deliberately the
+# NEUTRAL midpoint, not 0.0: coverage is lazily populated (29% for funk), so scoring
+# uncached artists at the bottom would exclude most of a genre. See spec §3.3.
+UNCACHED_PROMINENCE = 0.5
+
+
+def score_seed_candidates(
+    indices,
+    *,
+    artist_keys: dict,
+    prominence_by_artist: dict,
+    canonicity_by_index: dict,
+    centrality_by_index: dict,
+    investment_by_artist: dict,
+    weights: SeedWeights,
+    typicality_by_index: Optional[dict] = None,
+) -> dict:
+    """Composite seed score per bundle index. Higher is a better pier.
+
+    Missing prominence means UNCACHED, scored at the neutral midpoint. Missing
+    canonicity/centrality/typicality/investment mean genuinely absent and score 0.0.
+    ``typicality_by_index`` itself is optional (defaults to empty) since not every
+    caller computes sonic typicality.
+    """
+    typ_by_index = typicality_by_index or {}
+    out: dict = {}
+    for i in indices:
+        i = int(i)
+        ak = str(artist_keys.get(i, ""))
+        prom = prominence_by_artist.get(ak, UNCACHED_PROMINENCE)
+        out[i] = (
+            weights.prominence * float(prom)
+            + weights.canonicity * float(canonicity_by_index.get(i, 0.0))
+            + weights.centrality * float(centrality_by_index.get(i, 0.0))
+            + weights.typicality * float(typ_by_index.get(i, 0.0))
+            + weights.investment * float(investment_by_artist.get(ak, 0.0))
+        )
+    return out
+
+
+def select_piers_from_clusters(
+    clusters,
+    scores: dict,
+    artist_keys: dict,
+    *,
+    min_cluster_size: int,
+    bridgeable: Optional[set],
+    epoch: int = 0,
+) -> list:
+    """One pier per sonic cluster, at most one per artist, best-scoring first.
+
+    Clusters are visited best-candidate-first so a strong cluster claims its artist
+    before a weaker one does. A cluster smaller than ``min_cluster_size`` is skipped
+    (avoids a cluster of oddballs donating a pier — spec §6). A cluster whose every
+    candidate is unbridgeable or artist-blocked is dropped, not crashed.
+
+    ``bridgeable`` is the set of indices passing the pier-bridgeability veto, or None
+    to disable the check.
+
+    ``epoch`` rotates each cluster's ranked candidates so "give me another one" yields
+    a different playlist while staying reproducible: selection is a pure function of
+    (genre, epoch). epoch=0 picks each cluster's top scorer. Spec §3.7 option (C).
+    """
+    eligible = []
+    for cluster in clusters:
+        members = [int(i) for i in cluster]
+        if len(members) < int(min_cluster_size):
+            continue
+        members = [i for i in members if bridgeable is None or i in bridgeable]
+        if not members:
+            continue
+        members.sort(key=lambda i: (-float(scores.get(i, 0.0)), i))
+        if epoch:
+            offset = int(epoch) % len(members)
+            members = members[offset:] + members[:offset]
+        eligible.append(members)
+    eligible.sort(key=lambda m: -float(scores.get(m[0], 0.0)))
+
+    used_artists: set = set()
+    piers: list = []
+    for members in eligible:
+        for i in members:
+            ak = str(artist_keys.get(i, ""))
+            if ak and ak in used_artists:
+                continue
+            piers.append(i)
+            used_artists.add(ak)
+            break
+    piers.sort()
+    return piers
