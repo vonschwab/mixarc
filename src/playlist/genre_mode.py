@@ -287,6 +287,35 @@ def centrality_by_index(
     }
 
 
+def pool_genre_breakdown(conn: sqlite3.Connection, genre_ids) -> list:
+    """``(genre_id, track_count)`` per contributing genre, most tracks first.
+
+    Answers "which genres actually filled this pool, and how much did each add?"
+    — the question the alpha review could not answer from the logs, e.g. why an
+    ambient pool is dominated by neighbours rather than ambient itself.
+
+    One grouped query, not one per genre. Counts are per-genre and therefore sum
+    to MORE than the pool size when a track carries several pooled genres; the
+    pool itself is a distinct union.
+    """
+    gids = {str(g) for g in (genre_ids or ()) if str(g)}
+    if not gids:
+        return []
+    ph = ",".join("?" for _ in gids)
+    try:
+        rows = conn.execute(
+            f"SELECT reg.genre_id, COUNT(DISTINCT t.track_id) "
+            f"FROM tracks t JOIN release_effective_genres reg ON reg.album_id = t.album_id "
+            f"WHERE reg.genre_id IN ({ph}) "
+            f"  AND reg.assignment_layer IN ('observed_leaf', 'legacy') "
+            f"GROUP BY reg.genre_id",
+            tuple(gids),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    return sorted(((str(r[0]), int(r[1])) for r in rows), key=lambda t: (-t[1], t[0]))
+
+
 def filter_member_indices_by_duration(
     member_indices, durations_ms, *, min_seconds: int, max_seconds: int
 ) -> tuple:

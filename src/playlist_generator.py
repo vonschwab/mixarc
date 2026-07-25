@@ -3014,13 +3014,46 @@ class PlaylistGenerator:
             t['play_count'] = 0
 
         pier_index_by_id = {tid: i for i, tid in zip(pier_indices, pier_track_ids)}
-        for t in seed_tracks:
-            i = pier_index_by_id.get(str(t.get("rating_key")))
-            logger.info(
-                "stage=genre_seeds | pier idx=%s score=%.3f artist=%s title=%s",
-                i, scores.get(i, 0.0) if i is not None else 0.0,
-                t.get("artist"), t.get("title"),
-            )
+        # Cluster provenance: which sonic cluster each pier represents, and how big
+        # that cluster was. A pier drawn from a tiny peripheral cluster is the
+        # failure mode the alpha review identified, so it must be visible here.
+        _cluster_of: Dict[int, int] = {}
+        _cluster_size: Dict[int, int] = {}
+        for _cid, _members in enumerate(clusters):
+            for _m in _members:
+                _cluster_of[int(_m)] = _cid
+                _cluster_size[int(_m)] = len(_members)
+        _pier_conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            from src.genre.authority import display_genre_names_for_track
+            for t in seed_tracks:
+                i = pier_index_by_id.get(str(t.get("rating_key")))
+                ak = artist_key_by_index.get(i, "") if i is not None else ""
+                try:
+                    _eff = display_genre_names_for_track(_pier_conn, str(t.get("rating_key")))
+                except Exception:
+                    _eff = []
+                logger.info(
+                    "stage=genre_pier | artist=%s | title=%s | idx=%s | score=%.3f "
+                    "(prominence=%.3f canonicity=%.3f centrality=%.3f typicality=%.3f "
+                    "investment=%.3f) | cluster=%s size=%s | dur=%ss | effective_genres=%s",
+                    t.get("artist"), t.get("title"), i,
+                    scores.get(i, 0.0) if i is not None else 0.0,
+                    prominence.get(ak, genre_mode.UNCACHED_PROMINENCE),
+                    canonicity.get(i, 0.0) if i is not None else 0.0,
+                    centrality.get(i, 0.0) if i is not None else 0.0,
+                    typicality.get(i, 0.0) if i is not None else 0.0,
+                    investment.get(ak, 0.0),
+                    _cluster_of.get(i, "?") if i is not None else "?",
+                    _cluster_size.get(i, "?") if i is not None else "?",
+                    # Read duration from the ARTIFACT, not the track dict — the
+                    # library rows do not carry duration_ms, which logged 0s for
+                    # every pier on the first attempt.
+                    int(float(bundle.durations_ms[i]) / 1000) if i is not None else -1,
+                    _eff[:8],
+                )
+        finally:
+            _pier_conn.close()
 
         # --- DS candidate pool: the relaxed bridge pool, duration/title-filtered ---
         pool_track_dicts = self.library.get_tracks_by_ids(list(pool_ids))
@@ -3056,6 +3089,26 @@ class PlaylistGenerator:
             t.get("rating_key") for t in pool_track_dicts
             if t.get("rating_key") and str(t.get("rating_key")) not in excluded_ids
         ]
+
+        # Pool composition: which genres actually filled the pool. Without this the
+        # log cannot distinguish "the taxonomy pulled in the wrong neighbours" from
+        # "the target genre itself is contaminated" (spec §4.4).
+        try:
+            _bd_conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            try:
+                _breakdown = genre_mode.pool_genre_breakdown(_bd_conn, set(_sims))
+            finally:
+                _bd_conn.close()
+            _direct = next((n for g, n in _breakdown if g == resolution.genre_id), 0)
+            logger.info(
+                "stage=genre_pool | target=%s threshold=%.3f pool_tracks=%d | "
+                "direct_core=%d neighbour_contrib=%d | top_genres=%s",
+                resolution.genre_id, threshold_used, len(pool_ids),
+                _direct, sum(n for g, n in _breakdown if g != resolution.genre_id),
+                [f"{g}:{n}" for g, n in _breakdown[:10]],
+            )
+        except Exception as exc:  # diagnostics must never break generation
+            logger.debug("genre pool breakdown unavailable: %s", exc)
 
         logger.info(
             "DS scope: genre (threshold=%.3f allowed_ids=%d)", threshold_used, len(allowed_track_ids)
