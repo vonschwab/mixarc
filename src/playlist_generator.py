@@ -945,17 +945,17 @@ class PlaylistGenerator:
         )
 
         tracks: List[Dict[str, Any]] = []
-        # Hard-invariant warnings from post-order validation (Pass 1). Read from
-        # `stats` directly: the `ds_stats` line below reads `playlist_stats`, an
-        # attribute DSPipelineResult does not have, so it always yields {}.
-        # Pre-existing, unrelated to this feature — do not rely on it here.
-        try:
-            _pl_stats = (getattr(ds_result, "stats", {}) or {}).get("playlist") or {}
-            self._last_invariant_warnings = list(_pl_stats.get("invariant_warnings") or [])
-        except Exception:
-            self._last_invariant_warnings = []
+        # NOTE: `generate_playlist_ds` returns a DsRunResult, whose `playlist_stats`
+        # field holds the pipeline's FULL stats dict (ds_pipeline_runner assigns
+        # `playlist_stats=result.stats`). So `playlist_stats["playlist"]` is the
+        # playlist-level stats — reading `.stats` off this object instead yields
+        # nothing, because DsRunResult has no such attribute.
         ds_stats = getattr(ds_result, "playlist_stats", {}) or {}
         playlist_stats_only = ds_stats.get("playlist") or {}
+        # Hard-invariant warnings from post-order validation (Pass 1).
+        self._last_invariant_warnings = list(
+            playlist_stats_only.get("invariant_warnings") or []
+        )
         pool_seed_sonic = (ds_stats.get("candidate_pool") or {}).get("seed_sonic_sim_track_ids") or {}
         if hasattr(self.library, "get_tracks_by_ids"):
             fetched = getattr(self.library, "get_tracks_by_ids")(ds_result.track_ids)  # type: ignore[attr-defined]
