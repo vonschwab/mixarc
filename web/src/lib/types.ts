@@ -131,6 +131,11 @@ export interface PlaylistOut {
   metrics: MetricsOut;
   relaxations?: RelaxationEntry[];
   receipt?: Receipt | null;
+  /** Hard-invariant breaches (artist gap, per-artist cap). Distinct from
+   *  `relaxations`: a relaxation is the generator bending a guideline on
+   *  purpose; `degraded` means a stated guarantee was broken. */
+  warnings?: string[];
+  degraded?: boolean;
 }
 
 export interface JobOut {

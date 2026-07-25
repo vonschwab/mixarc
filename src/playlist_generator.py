@@ -430,6 +430,22 @@ class PlaylistGenerator:
             words = tuple(str(word) for word in raw_words)
         return enabled, words
 
+    def _invariant_result_fields(self) -> Dict[str, Any]:
+        """Hard-invariant breach fields for a playlist result dict.
+
+        Attached to EVERY mode's result, not just genre mode: the post-order
+        validator runs on every generation, and a breach is a breach regardless of
+        how the playlist was requested. Genre mode is merely where it surfaces most
+        — artist mode disallows the seed artist in bridge interiors, so its segment
+        pools cannot collapse onto a single artist the same way (spec
+        2026-07-25-genre-mode-pass1-invariants.md §2).
+
+        ``degraded`` means the playlist is still usable but broke a stated guarantee;
+        it never withholds the result.
+        """
+        warnings = list(getattr(self, "_last_invariant_warnings", []) or [])
+        return {"warnings": warnings, "degraded": bool(warnings)}
+
     def _filter_title_excluded_tracks(
         self,
         tracks: List[Dict[str, Any]],
@@ -2687,6 +2703,7 @@ class PlaylistGenerator:
             'tracks': final_tracks,
             'track_ids': [str(t.get('rating_key') or t.get('track_id') or '') for t in final_tracks],
             'ds_report': getattr(self, "_last_ds_report", None),
+            **self._invariant_result_fields(),
         }
         if fallback_used:
             result['genre_gate_fallback'] = True
@@ -3156,10 +3173,7 @@ class PlaylistGenerator:
             'tracks': final_tracks,
             'track_ids': [str(t.get('rating_key') or t.get('track_id') or '') for t in final_tracks],
             'ds_report': getattr(self, "_last_ds_report", None),
-            # Hard-invariant breaches (artist gap / per-artist cap / pier ratio).
-            # The playlist is still returned — `degraded` tells the caller to say so.
-            'warnings': list(getattr(self, "_last_invariant_warnings", []) or []),
-            'degraded': bool(getattr(self, "_last_invariant_warnings", [])),
+            **self._invariant_result_fields(),
         }
 
     def _generate_playlist_title(self, artist1: str, artist2: str, genres: List[str]) -> str:
@@ -3962,6 +3976,7 @@ class PlaylistGenerator:
             "ds_report": getattr(self, "_last_ds_report", None),
             "fallback_mode_used": fallback_used,
             "fallback_attempts": fallback_attempts if fallback_used else None,
+            **self._invariant_result_fields(),
         }
 
     def _get_additional_artist_tracks(self, artist: str, history: List[Dict[str, Any]],

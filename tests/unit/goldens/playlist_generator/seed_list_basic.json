@@ -2,11 +2,13 @@
   "result": "dict",
   "top_keys": [
     "artists",
+    "degraded",
     "fallback_attempts",
     "fallback_mode_used",
     "genres",
     "title",
-    "tracks"
+    "tracks",
+    "warnings"
   ],
   "track_count": 8,
   "track_ids": [

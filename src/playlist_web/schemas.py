@@ -97,6 +97,10 @@ class PlaylistOut(BaseModel):
     metrics: MetricsOut = Field(default_factory=MetricsOut)
     relaxations: list[dict] = Field(default_factory=list)
     receipt: Optional[dict] = None
+    # Hard-invariant breaches (artist gap, per-artist cap). The playlist is still
+    # returned; `degraded` tells the UI to say so rather than presenting it as clean.
+    warnings: list[str] = Field(default_factory=list)
+    degraded: bool = False
 
     @classmethod
     def from_worker(cls, raw: dict[str, Any]) -> "PlaylistOut":
@@ -143,6 +147,8 @@ class PlaylistOut(BaseModel):
             metrics=metrics,
             relaxations=relaxations,
             receipt=raw.get("receipt"),
+            warnings=[str(w) for w in (raw.get("warnings") or [])],
+            degraded=bool(raw.get("degraded", False)),
         )
 
 

@@ -1640,11 +1640,22 @@ def handle_generate_playlist(cmd_data: Dict[str, Any]) -> None:
                         logging.getLogger(__name__).warning(
                             "Bangers popularity annotation failed: %s", _exc)
 
+                # `warnings`/`degraded` are hard-invariant breaches from post-order
+                # validation (artist gap, per-artist cap) — distinct from the
+                # `relaxations` list below, which reports guidelines the generator
+                # deliberately bent to stay feasible. A relaxation is the system
+                # working; a degraded result is the system breaking a guarantee.
+                _invariant_warnings = [str(w) for w in (playlist_data.get("warnings") or [])]
                 playlist_result = {
                     "name": playlist_data.get('title', 'Generated Playlist'),
                     "tracks": formatted_tracks,
                     "track_count": len(formatted_tracks),
+                    "warnings": _invariant_warnings,
+                    "degraded": bool(playlist_data.get("degraded") or _invariant_warnings),
                 }
+                if _invariant_warnings:
+                    for _w in _invariant_warnings:
+                        emit_log("WARNING", f"Playlist degraded — {_w}")
 
                 # Include DS report metrics if available
                 if ds_report:

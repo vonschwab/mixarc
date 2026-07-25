@@ -22,6 +22,7 @@ import { ReplaceDialog } from "./components/ReplaceDialog";
 import { EditGenresDialog } from "./components/EditGenresDialog";
 import { ExportPlexDialog } from "./components/ExportPlexDialog";
 import { ExportM3U8Dialog } from "./components/ExportM3U8Dialog";
+import { DegradedNotice } from "./components/DegradedNotice";
 import { RelaxationNotice } from "./components/RelaxationNotice";
 import { GeneratingIndicator } from "./components/GeneratingIndicator";
 import { defaultPlaylistName } from "./lib/playlistName";
@@ -393,6 +394,7 @@ export default function App() {
                     onExportM3U8={() => setM3u8Open(true)}
                     onExportPlex={() => setPlexOpen(true)}
                   />
+                  <DegradedNotice warnings={playlist?.warnings ?? []} />
                   <RelaxationNotice relaxations={playlist?.relaxations ?? []} />
                   <div className="flex-1 overflow-auto">
                     <TrackTable
