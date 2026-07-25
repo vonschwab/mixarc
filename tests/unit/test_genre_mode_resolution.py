@@ -22,6 +22,10 @@ def conn():
             ("r_b_soul", "r b soul", "genre", 0.5, "active", "1"),
             ("shoegaze", "shoegaze", "genre", 0.9, "active", "1"),
             ("dead_genre", "dead genre", "genre", 0.9, "deprecated", "1"),
+            # Mirrors the live funk/funk_metal pair (funk=0.58, funk metal=0.80):
+            # a more specific genre substring-matches the exact query.
+            ("funk", "funk", "genre", 0.58, "active", "1"),
+            ("funk_metal", "funk metal", "genre", 0.80, "active", "1"),
         ],
     )
     c.executemany(
@@ -59,3 +63,13 @@ def test_alias_to_inactive_genre_is_excluded(conn):
 
 def test_empty_query_returns_empty(conn):
     assert canonical_genre_search(conn, "  ") == []
+
+
+def test_exact_name_match_beats_more_specific_substring_match(conn):
+    # Regression: querying "funk" used to return "funk metal" first (higher
+    # specificity_score, same "%funk%" substring) instead of the exact "funk"
+    # match — found via genre mode's acceptance run (2026-07-24).
+    results = canonical_genre_search(conn, "funk", limit=10)
+    assert results[0] == ("funk", "funk")
+    ids = [gid for gid, _ in results]
+    assert "funk_metal" in ids  # still returned, just not first

@@ -125,26 +125,40 @@ def canonical_genre_search(
 
     Returns ``(genre_id, canonical_name)`` — always the canonical name, even when
     the hit came from an alias, so a pick is always a real taxonomy genre. Ordered
-    canonical-name matches first, then most-specific first. Deduped by genre_id.
+    exact matches first (a query equal to a canonical name or alias, case-
+    insensitive), then canonical-name matches before alias matches, then
+    most-specific first. Deduped by genre_id.
+
+    The exact-match tier exists because ``specificity_score`` alone can rank a
+    more specific *substring* match above the literal query: querying "funk"
+    against `funk` (specificity 0.58) and `funk metal` (specificity 0.80, matches
+    via the same `%funk%` substring) returned `funk metal` first pre-fix — found
+    via genre mode's acceptance run (2026-07-24), where typing the exact genre
+    name silently generated a different, more specific genre instead.
     """
     q = (query or "").strip()
     if not q:
         return []
     rows = conn.execute(
-        "SELECT g.genre_id, g.name, MIN(m.via_alias) AS via_alias "
+        "SELECT g.genre_id, g.name, MIN(m.via_alias) AS via_alias, "
+        "MAX(m.is_exact) AS is_exact "
         "FROM ("
-        "  SELECT genre_id, 0 AS via_alias FROM genre_graph_canonical_genres "
+        "  SELECT genre_id, 0 AS via_alias, "
+        "         CASE WHEN LOWER(name) = LOWER(?) THEN 1 ELSE 0 END AS is_exact "
+        "  FROM genre_graph_canonical_genres "
         "   WHERE LOWER(name) LIKE '%' || LOWER(?) || '%' "
         "  UNION ALL "
-        "  SELECT canonical_genre_id AS genre_id, 1 AS via_alias FROM genre_graph_aliases "
+        "  SELECT canonical_genre_id AS genre_id, 1 AS via_alias, "
+        "         CASE WHEN LOWER(alias) = LOWER(?) THEN 1 ELSE 0 END AS is_exact "
+        "  FROM genre_graph_aliases "
         "   WHERE LOWER(alias) LIKE '%' || LOWER(?) || '%' "
         ") m "
         "JOIN genre_graph_canonical_genres g ON g.genre_id = m.genre_id "
         "WHERE g.status = 'active' "
         "GROUP BY g.genre_id, g.name "
-        "ORDER BY via_alias ASC, g.specificity_score DESC, g.name ASC "
+        "ORDER BY is_exact DESC, via_alias ASC, g.specificity_score DESC, g.name ASC "
         "LIMIT ?",
-        (q, q, limit),
+        (q, q, q, q, limit),
     ).fetchall()
     return [(r[0], r[1]) for r in rows]
 
