@@ -1,4 +1,7 @@
 # tests/unit/test_genre_mode_seeds.py
+import sqlite3
+from unittest.mock import patch
+
 import pytest
 from src.playlist.genre_mode import (
     SeedWeights, score_seed_candidates, select_piers_from_clusters,
@@ -150,3 +153,125 @@ def test_epoch_preserves_cluster_priority_by_true_best_score():
     # Cluster A (true best 0.9) goes first, takes 11 (artist b). Cluster B then
     # finds its rotated head 21 is artist b (taken) and falls through to 20.
     assert piers == [11, 20]
+
+
+def test_medoid_precap_would_have_hidden_a_high_prominence_candidate():
+    """Illustrates the finding at the select_piers_from_clusters boundary: when
+    cluster_artist_tracks's medoid pre-filter caps a cluster's candidate list to
+    the top-N by sonic centrality (its own ranking criterion, unrelated to the
+    composite score), a track that scores highest on the COMPOSITE score
+    (prominence-dominated here) but is only #16 of 20 by centrality never even
+    reaches select_piers_from_clusters when N=8 (the old hardcoded cap) -- it
+    loses to a sonically-central-but-unremarkable candidate. With the cap lifted
+    (the fix), the same composite score correctly promotes it.
+    """
+    n = 20
+    # Index order here IS the centrality rank order (0 = most sonically central,
+    # matching _medoids_for_cluster's own argsort-by-similarity-to-centroid
+    # ranking) -- mirrors how cluster_artist_tracks orders medoids_by_cluster.
+    centrality_ranked = list(range(n))
+    high_prominence_index = 15  # rank #16 by centrality -- outside an old top-8 cap
+    # Composite scores: monotonically decreasing with centrality rank, EXCEPT the
+    # prominence-dominated candidate, which wins the whole cluster on the
+    # composite (prominence 1.0 * weight 1.0 dwarfs the ~0.1-scale spread here).
+    scores = {i: 0.1 * (n - i) for i in centrality_ranked}
+    scores[high_prominence_index] = 100.0
+    artist_keys = {i: f"artist_{i}" for i in centrality_ranked}
+
+    # OLD: cluster_artist_tracks's medoid_top_k=8 pre-filter has already thrown
+    # away everything past centrality rank 8 BEFORE the composite score is ever
+    # computed on it -- select_piers_from_clusters never even sees index 15.
+    old_precapped_cluster = centrality_ranked[:8]
+    old_piers = select_piers_from_clusters(
+        clusters=[old_precapped_cluster], scores=scores, artist_keys=artist_keys,
+        min_cluster_size=1, bridgeable=None,
+    )
+    assert high_prominence_index not in old_piers
+    assert old_piers == [0]  # best-by-composite among the precapped 8 is rank 0
+
+    # NEW: the pre-filter is uncapped (a pure veto, not a ranking cut), so the
+    # composite score sees the whole cluster and correctly promotes the
+    # prominent-but-sonically-peripheral candidate.
+    new_piers = select_piers_from_clusters(
+        clusters=[centrality_ranked], scores=scores, artist_keys=artist_keys,
+        min_cluster_size=1, bridgeable=None,
+    )
+    assert new_piers == [high_prominence_index]
+
+
+def test_create_playlist_for_genre_passes_configured_pool_size_not_hardcoded_8(
+    monkeypatch, tmp_path,
+):
+    """Regression for the "medoid pre-filter silently caps the composite score's
+    reach" finding (audit Important). create_playlist_for_genre must pass
+    playlists.genre_playlist.seed_candidate_pool_size through to
+    cluster_artist_tracks's medoid_top_k -- not a hardcoded 8. Patches
+    cluster_artist_tracks to capture its kwargs and abort immediately; everything
+    upstream (genre resolution/pool relaxation/artifact bundle) is faked to the
+    minimum needed to reach that call, so this never touches a real DB or
+    artifact.
+    """
+    from src.config_loader import Config
+    from src.playlist_generator import PlaylistGenerator
+    from src.playlist import genre_mode as genre_mode_module
+
+    db_path = tmp_path / "empty.db"
+    sqlite3.connect(str(db_path)).close()  # just needs to exist & be openable ro
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "library:\n"
+        f"  database_path: {db_path.as_posix()}\n"
+        "playlists:\n"
+        "  genre_playlist:\n"
+        "    seed_candidate_pool_size: 54321\n"
+        "  ds_pipeline:\n"
+        f"    artifact_path: {(tmp_path / 'artifact.npz').as_posix()}\n"
+    )
+    cfg = Config(str(config_path))
+
+    class _StopEarly(Exception):
+        pass
+
+    captured: dict = {}
+
+    def _fake_cluster_artist_tracks(**kwargs):
+        captured.update(kwargs)
+        raise _StopEarly
+
+    class _FakeBundle:
+        track_ids = ["t0", "t1", "t2", "t3"]
+        artist_keys = ["a0", "a1", "a2", "a3"]
+
+    class _FakeResolution:
+        genre_id = "shoegaze"
+        name = "shoegaze"
+
+    monkeypatch.setattr(
+        genre_mode_module, "resolve_genre_query",
+        lambda conn, q: _FakeResolution(),
+    )
+    monkeypatch.setattr(
+        genre_mode_module, "seed_member_track_ids",
+        lambda conn, gid: {"t0", "t1", "t2", "t3"},
+    )
+    monkeypatch.setattr(
+        genre_mode_module, "resolve_pool_with_relaxation",
+        lambda *a, **kw: ({"t0", "t1", "t2", "t3"}, {}, 0.35),
+    )
+
+    generator = PlaylistGenerator(library_client=object(), config=cfg)
+
+    with patch(
+        "src.playlist.pier_bridge.taxonomy_steering.get_taxonomy_steering",
+        return_value=object(),
+    ), patch(
+        "src.playlist_generator.load_artifact_bundle", return_value=_FakeBundle(),
+    ), patch(
+        "src.playlist_generator.cluster_artist_tracks",
+        side_effect=_fake_cluster_artist_tracks,
+    ):
+        with pytest.raises(_StopEarly):
+            generator.create_playlist_for_genre(genre_name="shoegaze", track_count=30)
+
+    assert captured.get("medoid_top_k") == 54321

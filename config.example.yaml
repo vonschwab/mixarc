@@ -928,6 +928,18 @@ playlists:
     seed_weight_investment: 0.15   # how much of that artist you own in this genre
     # A sonic cluster smaller than this cannot donate a pier (avoids oddball anchors).
     min_cluster_size: 3
+    # How many per-cluster candidates (ranked by cluster_artist_tracks's internal
+    # sonic-centrality/duration/support criteria) reach the composite seed score
+    # above. This is meant as a PURE VETO FILTER, not a ranking cut: the composite
+    # score (prominence/canonicity/centrality/typicality/investment) is what should
+    # actually rank candidates within a cluster. Keep this well above the largest
+    # real cluster size in the library (the fattest genre today is ~5.2k exact
+    # members across >=3 clusters -- see config.example.yaml history/spec
+    # 2026-07-24-genre-mode-design.md) so effectively every bridgeable member of
+    # every cluster is scored, not just the top few by sonic centrality. Do not
+    # lower this to "speed things up" -- the medoid machinery is cheap even at
+    # library scale (~0.1s for a 5k-track single cluster, measured).
+    seed_candidate_pool_size: 100000
 
   similarity:
     min_threshold: 0.5

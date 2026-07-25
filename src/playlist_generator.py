@@ -2865,15 +2865,22 @@ class PlaylistGenerator:
         max_artist_fraction = ds_cfg.get("candidate_pool", {}).get("max_artist_fraction", 0.125)
         target_pier_count = max(3, round(track_count * max_artist_fraction))
 
-        # medoid_top_k > 1 gives several ranked candidates per cluster so the genre
-        # composite score has something to choose between.
+        # medoid_top_k controls how many per-cluster candidates reach the composite
+        # score below. It must act as a pure VETO filter (bridgeability + duration/
+        # support demotion), never a ranking cut -- the composite score is what
+        # should rank candidates within a cluster, not cluster_artist_tracks's
+        # internal sonic-centrality criteria. playlists.genre_playlist.
+        # seed_candidate_pool_size (config.example.yaml) is sized well above any
+        # real cluster's membership so this is effectively uncapped; see the
+        # comment there and spec 2026-07-24-genre-mode-design.md.
+        seed_candidate_pool_size = int(gp_cfg.get("seed_candidate_pool_size", 100000))
         clusters, medoids, medoids_by_cluster, X_norm, support_by_index = cluster_artist_tracks(
             bundle=bundle,
             artist_name=f"[genre:{resolution.genre_id}]",   # log label only
             cfg=style_cfg,
             random_seed=int(ds_cfg.get("random_seed", 0) or 0),
             member_indices=member_indices,
-            medoid_top_k=8,
+            medoid_top_k=seed_candidate_pool_size,
             target_pier_count=target_pier_count,
             metadata_db_path=db_path,
         )
