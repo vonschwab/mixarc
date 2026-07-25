@@ -58,10 +58,6 @@ def make_synthetic_generator() -> PlaylistGenerator:
     lib_mock.get_tracks_by_ids.return_value = list(SYNTHETIC_TRACKS[:5])
     lib_mock.get_similar_tracks.return_value = list(SYNTHETIC_TRACKS[:3])
 
-    # genre-mode library methods
-    lib_mock.get_tracks_for_genre.return_value = list(SYNTHETIC_TRACKS)
-    lib_mock.suggest_similar_genres.return_value = []
-
     gen.library = lib_mock
 
     # --- optional clients (all None / disabled) ---
