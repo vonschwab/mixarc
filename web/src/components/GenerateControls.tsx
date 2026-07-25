@@ -317,14 +317,28 @@ export function GenerateControls({
             GenreAutocomplete.tsx and /api/genres/search). */}
         {mode === "genre" && (
           <Cell className="flex-1 min-w-[220px]">
-            <GenreAutocomplete
-              data-testid="seed-input"
-              value={seed}
-              onChange={setSeed}
-              onPick={(name) => setSeed(name)}
-              placeholder="Genre…"
-              className={inputClassName}
-            />
+            <div
+              className="w-full"
+              onKeyDown={(e) => {
+                // GenreAutocomplete's own onKeyDown preventDefault()s Enter only when
+                // it acts (a suggestion is open and gets picked). If it didn't act —
+                // no suggestions open, e.g. an exact canonical name was typed, or a
+                // suggestion was already picked — fall through to submit, restoring
+                // the "type + Enter" flow the shared artist/genre input used to have.
+                // Deliberately reads e.defaultPrevented rather than mirroring the
+                // component's internal suggestions state (would duplicate state).
+                if (e.key === "Enter" && !e.defaultPrevented) submit();
+              }}
+            >
+              <GenreAutocomplete
+                data-testid="seed-input"
+                value={seed}
+                onChange={setSeed}
+                onPick={(name) => setSeed(name)}
+                placeholder="Genre…"
+                className={inputClassName}
+              />
+            </div>
           </Cell>
         )}
 

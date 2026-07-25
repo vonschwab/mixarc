@@ -41,18 +41,49 @@ describe("GenerateControls disclosure", () => {
 });
 
 describe("GenerateControls genre mode", () => {
-  it("shows genre autocomplete suggestions in genre mode", async () => {
+  it("shows genre autocomplete suggestions in genre mode and picking one fills the input with the canonical name", async () => {
     vi.spyOn(api, "genresSearch").mockResolvedValue({
       items: [{ genre_id: "shoegaze", name: "shoegaze" }],
     });
     renderControls({ mode: "genre" });
-    fireEvent.change(screen.getByPlaceholderText("Genre…"), { target: { value: "shoe" } });
+    const input = screen.getByPlaceholderText("Genre…") as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "shoe" } });
     await waitFor(() => expect(api.genresSearch).toHaveBeenCalled());
-    expect(await screen.findByText("shoegaze")).toBeTruthy();
+    const suggestion = await screen.findByText("shoegaze");
+    fireEvent.click(suggestion);
+    // The picked canonical name is what ultimately feeds GenerateRequestBody.genre —
+    // asserting only that the suggestion rendered would pass even if onPick were wired
+    // to a no-op.
+    expect(input.value).toBe("shoegaze");
   });
 
   it("hides the artist Style popover in genre mode", () => {
     renderControls({ mode: "genre" });
     expect(screen.queryByText(/style/i)).toBeNull();
+  });
+
+  it("Enter submits when no genre suggestions are open", async () => {
+    vi.spyOn(api, "genresSearch").mockResolvedValue({ items: [] });
+    const onSubmit = vi.fn();
+    renderControls({ mode: "genre", onSubmit });
+    const input = screen.getByPlaceholderText("Genre…");
+    fireEvent.change(input, { target: { value: "shoegaze" } });
+    await waitFor(() => expect(api.genresSearch).toHaveBeenCalled());
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+  });
+
+  it("Enter picks the top suggestion instead of submitting when suggestions are open", async () => {
+    vi.spyOn(api, "genresSearch").mockResolvedValue({
+      items: [{ genre_id: "shoegaze", name: "shoegaze" }],
+    });
+    const onSubmit = vi.fn();
+    renderControls({ mode: "genre", onSubmit });
+    const input = screen.getByPlaceholderText("Genre…") as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "shoe" } });
+    await screen.findByText("shoegaze"); // suggestion dropdown open
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(input.value).toBe("shoegaze");
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 });
