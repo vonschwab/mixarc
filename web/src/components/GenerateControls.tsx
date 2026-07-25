@@ -439,7 +439,7 @@ export function GenerateControls({
             {busy ? "Generating…" : "▸ Generate"}
           </button>
         </Cell>
-        {mode === "artist" && (
+        {(mode === "artist" || mode === "genre") && (
           <Cell>
             <button onClick={() => { setSeedEpoch((e) => e + 1); submit(seedEpoch + 1); }}
               disabled={busy}

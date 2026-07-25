@@ -87,3 +87,44 @@ describe("GenerateControls genre mode", () => {
     expect(onSubmit).not.toHaveBeenCalled();
   });
 });
+
+describe("GenerateControls New Seeds button", () => {
+  it("renders the New Seeds button in artist mode", () => {
+    renderControls({ mode: "artist" });
+    const button = screen.queryByTitle("Re-roll: same settings, fresh seed tracks.");
+    expect(button).not.toBeNull();
+    expect(button?.textContent).toContain("↻ New Seeds");
+  });
+
+  it("renders the New Seeds button in genre mode", () => {
+    renderControls({ mode: "genre" });
+    const button = screen.queryByTitle("Re-roll: same settings, fresh seed tracks.");
+    expect(button).not.toBeNull();
+    expect(button?.textContent).toContain("↻ New Seeds");
+  });
+
+  it("does not render the New Seeds button in seeds mode", () => {
+    renderControls({ mode: "seeds" });
+    const button = screen.queryByTitle("Re-roll: same settings, fresh seed tracks.");
+    expect(button).toBeNull();
+  });
+
+  it("clicking the New Seeds button in genre mode submits with incremented seed_epoch", () => {
+    const onSubmit = vi.fn();
+    renderControls({ mode: "genre", onSubmit });
+
+    // First click should submit with epoch 1
+    const button = screen.queryByTitle("Re-roll: same settings, fresh seed tracks.");
+    expect(button).not.toBeNull();
+    fireEvent.click(button!);
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    const firstCall = onSubmit.mock.calls[0][0];
+    expect(firstCall.seed_epoch).toBe(1);
+
+    // Second click should submit with epoch 2
+    fireEvent.click(button!);
+    expect(onSubmit).toHaveBeenCalledTimes(2);
+    const secondCall = onSubmit.mock.calls[1][0];
+    expect(secondCall.seed_epoch).toBe(2);
+  });
+});
