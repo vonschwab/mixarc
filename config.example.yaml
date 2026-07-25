@@ -906,6 +906,29 @@ playlists:
     - demo
     - reissue
     - compilation
+
+  # Genre mode (spec 2026-07-24-genre-mode-design.md). NOTE: distinct from
+  # `genre_mode` above, which is the pool-GATING axis. This block configures the
+  # "pick a genre, get a playlist" generation mode.
+  genre_playlist:
+    # Bridge-pool breadth: minimum hub-damped taxonomy similarity to the chosen
+    # genre. Keyed by cohesion_mode. Higher = tighter.
+    similarity_threshold_strict: 0.50
+    similarity_threshold_narrow: 0.42
+    similarity_threshold_dynamic: 0.35
+    similarity_threshold_discover: 0.20
+    # Starvation relaxation: thresholds tried in order when the pool is too small.
+    # Steps at or above the starting threshold are ignored.
+    relaxation_steps: [0.35, 0.20, 0.10]
+    # Composite seed score weights.
+    seed_weight_prominence: 1.0    # cross-artist Last.fm listeners (log-scaled)
+    seed_weight_canonicity: 0.5    # within-artist Last.fm rank
+    seed_weight_centrality: 0.75   # authority confidence / genre purity
+    seed_weight_typicality: 0.75   # sonic closeness to THIS genre's centroid
+    seed_weight_investment: 0.15   # how much of that artist you own in this genre
+    # A sonic cluster smaller than this cannot donate a pier (avoids oddball anchors).
+    min_cluster_size: 3
+
   similarity:
     min_threshold: 0.5
     artist_direct_match: 0.9
