@@ -618,17 +618,24 @@ class TestRunPostOrderValidation:
         assert result.summary["final_size"] == 3
         assert result.summary["expected_size"] == 3
 
-    def test_length_mismatch_warns_not_errors(self, caplog):
-        """Length mismatch is now a soft warning (retired exact-N guarantee).
+    def test_length_in_band_is_informational_not_a_warning(self, caplog):
+        """A band length is EXPECTED behaviour, so it logs at INFO, not WARNING.
 
-        variable-bridge mode produces totals in a band [N-m, N+m]; the old
-        behaviour of adding "length_mismatch" to errors and causing the caller
-        to raise has been removed (Dylan's decision, Task 3).  A WARNING is
-        emitted instead so the mismatch is still visible in logs.
+        History: exact-N was retired when variable-bridge mode landed (it flexes
+        interior length to lift the worst edge), and the check was demoted from
+        error to WARNING. Pass 1 (2026-07-25) demotes it again to INFO, on Dylan's
+        explicit ruling that exact playlist length is not a goal at all — track
+        count is arbitrary given tracks vary in duration, and the meaningful
+        invariant is the pier-to-bridge ratio, checked separately.
+
+        The demotion matters beyond taste: Pass 1 introduces genuine hard-invariant
+        breaches (artist gap, per-artist cap) that log at WARNING. Leaving expected
+        behaviour at the same level would dilute that signal and train readers to
+        ignore it.
         """
         import logging
         bundle = _make_bundle(["t0", "t1", "t2"])
-        with caplog.at_level(logging.WARNING, logger="src.playlist.pipeline.post_validation"):
+        with caplog.at_level(logging.INFO, logger="src.playlist.pipeline.post_validation"):
             result = run_post_order_validation(
                 bundle=bundle,
                 ordered_track_ids=["t0", "t1"],
@@ -636,10 +643,14 @@ class TestRunPostOrderValidation:
                 excluded_track_ids=None,
                 seed_track_ids_for_pier=["t0"],
             )
-        # No error — band lengths must not block generation.
+        # Still no error — band lengths must not block generation.
         assert result.errors == []
-        # Warning must be present so the mismatch is still visible.
-        assert any("length_mismatch" in r.message for r in caplog.records)
+        # And no warning either: a band length does not degrade the run.
+        assert result.warnings == []
+        # Visible at INFO so the band remains auditable.
+        records = [r for r in caplog.records if "length_in_band" in r.message]
+        assert records, "band length should still be logged"
+        assert all(r.levelno == logging.INFO for r in records)
 
     def test_recency_overlap_excludes_piers(self):
         """Pier ids in the excluded set don't count as overlap violations."""
