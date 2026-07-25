@@ -160,9 +160,9 @@ def artist_prominence(db_path: str, artist_keys: set) -> Dict[str, float]:
     for key in keys:
         try:
             top = get_artist_top_tracks_cached(db_path, key)
-        except sqlite3.Error:
+            listeners = [int(t.get("listeners") or 0) for t in (top or [])]
+        except Exception:
             continue
-        listeners = [int(t.get("listeners") or 0) for t in (top or [])]
         best = max(listeners) if listeners else 0
         if best > 0:
             raw[key] = math.log10(float(best))
