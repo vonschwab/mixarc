@@ -1,5 +1,5 @@
 schema_version: 1
-taxonomy_version: 0.53.1-isa-backfill-edge-upgrade
+taxonomy_version: 0.53.3-hardcore-sense-fix
 description: Conservative structured seed taxonomy for the Playlist Generator layered
   genre graph. Reviewed for schema consistency, fixture coverage, and conservative
   source-backed genre/facet policy; designed as sidecar/import input only.
@@ -1758,6 +1758,11 @@ records:
     weight: 0.45
     confidence: 0.85
     notes: null
+  - target: americana
+    edge_type: is_a
+    weight: 0.75
+    confidence: 0.85
+    notes: null
   secondary_roles:
   - role: modifier
     facet_type: mood
@@ -1841,6 +1846,11 @@ records:
   - target: dub
     edge_type: fusion_of
     weight: 0.45
+    confidence: 0.85
+    notes: null
+  - target: dub
+    edge_type: is_a
+    weight: 0.75
     confidence: 0.85
     notes: null
   secondary_roles: []
@@ -2445,7 +2455,12 @@ records:
   facet_type: null
   specificity_score: null
   canonical_target: dream pop
-  parent_edges: []
+  parent_edges:
+  - target: pop
+    edge_type: is_a
+    weight: 0.75
+    confidence: 0.85
+    notes: null
   secondary_roles: []
   reject_reason: null
   alias_policy:
@@ -4698,6 +4713,11 @@ records:
     weight: 0.82
     confidence: 0.85
     notes: null
+  - target: classical
+    edge_type: is_a
+    weight: 0.75
+    confidence: 0.85
+    notes: null
   secondary_roles: []
   reject_reason: null
   alias_policy: null
@@ -4720,6 +4740,11 @@ records:
   - target: modern classical
     edge_type: scene_adjacent
     weight: 0.45
+    confidence: 0.85
+    notes: null
+  - target: classical
+    edge_type: is_a
+    weight: 0.75
     confidence: 0.85
     notes: null
   secondary_roles: []
@@ -4924,6 +4949,11 @@ records:
   - target: art pop
     edge_type: scene_adjacent
     weight: 0.35
+    confidence: 0.85
+    notes: null
+  - target: soul
+    edge_type: is_a
+    weight: 0.75
     confidence: 0.85
     notes: null
   secondary_roles: []
@@ -7863,6 +7893,11 @@ records:
     weight: 0.4
     confidence: 0.6
     notes: similar_to (growth)
+  - target: country
+    edge_type: is_a
+    weight: 0.75
+    confidence: 0.85
+    notes: null
   secondary_roles: []
   reject_reason: null
   alias_policy: null
@@ -8072,6 +8107,11 @@ records:
     weight: 0.4
     confidence: 0.6
     notes: similar_to (growth)
+  - target: punk
+    edge_type: is_a
+    weight: 0.75
+    confidence: 0.85
+    notes: null
   secondary_roles: []
   reject_reason: null
   alias_policy: null
@@ -10247,6 +10287,11 @@ records:
     weight: 0.4
     confidence: 0.6
     notes: similar_to (growth)
+  - target: punk
+    edge_type: is_a
+    weight: 0.75
+    confidence: 0.85
+    notes: null
   secondary_roles: []
   reject_reason: null
   alias_policy: null
@@ -10764,6 +10809,11 @@ records:
     weight: 0.4
     confidence: 0.6
     notes: similar_to (growth)
+  - target: punk
+    edge_type: is_a
+    weight: 0.75
+    confidence: 0.85
+    notes: null
   secondary_roles: []
   reject_reason: null
   alias_policy: null
@@ -12431,6 +12481,11 @@ records:
     weight: 0.4
     confidence: 0.6
     notes: similar_to (growth)
+  - target: punk
+    edge_type: is_a
+    weight: 0.75
+    confidence: 0.85
+    notes: null
   secondary_roles: []
   reject_reason: null
   alias_policy: null
@@ -12566,6 +12621,11 @@ records:
     weight: 0.4
     confidence: 0.6
     notes: similar_to (growth)
+  - target: rock
+    edge_type: is_a
+    weight: 0.75
+    confidence: 0.85
+    notes: null
   secondary_roles: []
   reject_reason: null
   alias_policy: null
@@ -13158,6 +13218,11 @@ records:
     weight: 0.4
     confidence: 0.6
     notes: similar_to (growth)
+  - target: punk
+    edge_type: is_a
+    weight: 0.75
+    confidence: 0.85
+    notes: null
   secondary_roles: []
   reject_reason: null
   alias_policy: null
@@ -14061,6 +14126,11 @@ records:
     weight: 0.4
     confidence: 0.6
     notes: similar_to (growth)
+  - target: pop
+    edge_type: is_a
+    weight: 0.75
+    confidence: 0.85
+    notes: null
   secondary_roles: []
   reject_reason: null
   alias_policy: null
@@ -14221,6 +14291,11 @@ records:
     weight: 0.4
     confidence: 0.6
     notes: similar_to (growth)
+  - target: rave
+    edge_type: is_a
+    weight: 0.75
+    confidence: 0.85
+    notes: null
   secondary_roles: []
   reject_reason: null
   alias_policy: null
@@ -16068,6 +16143,11 @@ records:
     weight: 0.4
     confidence: 0.6
     notes: similar_to (growth)
+  - target: classical
+    edge_type: is_a
+    weight: 0.75
+    confidence: 0.85
+    notes: null
   secondary_roles: []
   reject_reason: null
   alias_policy: null
@@ -16369,6 +16449,11 @@ records:
     weight: 0.4
     confidence: 0.6
     notes: similar_to (growth)
+  - target: punk
+    edge_type: is_a
+    weight: 0.75
+    confidence: 0.85
+    notes: null
   secondary_roles: []
   reject_reason: null
   alias_policy: null
@@ -16763,6 +16848,11 @@ records:
     weight: 0.4
     confidence: 0.6
     notes: similar_to (growth)
+  - target: pop
+    edge_type: is_a
+    weight: 0.75
+    confidence: 0.85
+    notes: null
   secondary_roles: []
   reject_reason: null
   alias_policy: null
@@ -16923,6 +17013,11 @@ records:
     weight: 0.4
     confidence: 0.6
     notes: similar_to (growth)
+  - target: punk
+    edge_type: is_a
+    weight: 0.75
+    confidence: 0.85
+    notes: null
   secondary_roles: []
   reject_reason: null
   alias_policy: null
@@ -18049,6 +18144,11 @@ records:
     weight: 0.4
     confidence: 0.6
     notes: similar_to (growth)
+  - target: soul
+    edge_type: is_a
+    weight: 0.75
+    confidence: 0.85
+    notes: null
   secondary_roles: []
   reject_reason: null
   alias_policy: null
@@ -18984,6 +19084,11 @@ records:
     weight: 0.25
     confidence: 0.7
     notes: null
+  - target: punk
+    edge_type: is_a
+    weight: 0.75
+    confidence: 0.85
+    notes: null
   secondary_roles: []
   reject_reason: null
   alias_policy: null
@@ -19039,6 +19144,11 @@ records:
     weight: 0.4
     confidence: 0.6
     notes: similar_to (growth)
+  - target: punk
+    edge_type: is_a
+    weight: 0.75
+    confidence: 0.85
+    notes: null
   secondary_roles: []
   reject_reason: null
   alias_policy: null
@@ -19094,6 +19204,11 @@ records:
     weight: 0.4
     confidence: 0.6
     notes: similar_to (growth)
+  - target: punk
+    edge_type: is_a
+    weight: 0.75
+    confidence: 0.85
+    notes: null
   secondary_roles: []
   reject_reason: null
   alias_policy: null
@@ -19257,6 +19372,11 @@ records:
     weight: 0.4
     confidence: 0.6
     notes: similar_to (growth)
+  - target: country
+    edge_type: is_a
+    weight: 0.75
+    confidence: 0.85
+    notes: null
   secondary_roles: []
   reject_reason: null
   alias_policy: null
@@ -19656,6 +19776,11 @@ records:
     weight: 0.4
     confidence: 0.6
     notes: similar_to (growth)
+  - target: punk
+    edge_type: is_a
+    weight: 0.75
+    confidence: 0.85
+    notes: null
   secondary_roles: []
   reject_reason: null
   alias_policy: null
@@ -21171,6 +21296,11 @@ records:
     weight: 0.4
     confidence: 0.6
     notes: similar_to (growth)
+  - target: soul
+    edge_type: is_a
+    weight: 0.75
+    confidence: 0.85
+    notes: null
   secondary_roles: []
   reject_reason: null
   alias_policy: null
@@ -22567,6 +22697,11 @@ records:
     edge_type: family_context
     weight: 0.5
     confidence: 0.8
+    notes: null
+  - target: rock
+    edge_type: is_a
+    weight: 0.75
+    confidence: 0.85
     notes: null
   secondary_roles: []
   reject_reason: null
@@ -23999,6 +24134,11 @@ records:
   - target: brazilian/latin
     edge_type: family_context
     weight: 0.6
+    confidence: 0.85
+    notes: null
+  - target: alternative
+    edge_type: is_a
+    weight: 0.75
     confidence: 0.85
     notes: null
   secondary_roles: []
@@ -26956,6 +27096,11 @@ records:
     weight: 0.4
     confidence: 0.6
     notes: similar_to (growth)
+  - target: pop
+    edge_type: is_a
+    weight: 0.75
+    confidence: 0.85
+    notes: null
   secondary_roles: []
   reject_reason: null
   alias_policy: null
@@ -27297,6 +27442,11 @@ records:
     weight: 0.4
     confidence: 0.6
     notes: similar_to (growth)
+  - target: funk
+    edge_type: is_a
+    weight: 0.75
+    confidence: 0.85
+    notes: null
   secondary_roles: []
   reject_reason: null
   alias_policy: null
@@ -28392,6 +28542,11 @@ records:
     weight: 0.4
     confidence: 0.6
     notes: similar_to (growth)
+  - target: hardcore
+    edge_type: is_a
+    weight: 0.75
+    confidence: 0.85
+    notes: null
   secondary_roles: []
   reject_reason: null
   alias_policy: null
@@ -30755,6 +30910,11 @@ records:
     weight: 0.75
     confidence: 0.85
     notes: null
+  - target: hardcore
+    edge_type: is_a
+    weight: 0.75
+    confidence: 0.85
+    notes: null
   secondary_roles: []
   reject_reason: null
   alias_policy: null
@@ -31452,6 +31612,11 @@ records:
     weight: 0.4
     confidence: 0.6
     notes: similar_to (growth)
+  - target: classical
+    edge_type: is_a
+    weight: 0.75
+    confidence: 0.85
+    notes: null
   secondary_roles: []
   reject_reason: null
   alias_policy: null
@@ -31863,6 +32028,11 @@ records:
     edge_type: family_context
     weight: 0.45
     confidence: 0.8
+    notes: null
+  - target: cumbia
+    edge_type: is_a
+    weight: 0.75
+    confidence: 0.85
     notes: null
   secondary_roles: []
   reject_reason: null
@@ -33339,6 +33509,11 @@ records:
     edge_type: family_context
     weight: 0.45
     confidence: 0.8
+    notes: null
+  - target: jazz
+    edge_type: is_a
+    weight: 0.75
+    confidence: 0.85
     notes: null
   secondary_roles: []
   reject_reason: null
@@ -34989,6 +35164,11 @@ records:
     weight: 0.45
     confidence: 0.8
     notes: null
+  - target: reggae
+    edge_type: is_a
+    weight: 0.75
+    confidence: 0.85
+    notes: null
   secondary_roles: []
   reject_reason: null
   alias_policy: null
@@ -35875,7 +36055,7 @@ records:
   specificity_score: 0.71
   canonical_target: null
   parent_edges:
-  - target: hardcore
+  - target: hardcore techno
     edge_type: is_a
     weight: 0.8
     confidence: 0.85
