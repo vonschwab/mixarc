@@ -153,3 +153,40 @@ def test_genre_mode_generates_and_respects_diversity(
         f"(need >= {_MIN_EXACT_GENRE_OVERLAP}) -- the pool may have drawn from the "
         f"wrong genre despite the display name matching"
     )
+
+
+@pytest.mark.integration
+def test_umbrella_genre_membership_reaches_its_is_a_descendants():
+    """The motivating case, guarded against the LIVE library.
+
+    Before transitive `is_a` seeding, soul's member set was 214 tracks from 13
+    artists (J Dilla, TOPS, Bill Callahan) while Marvin Gaye, Aretha and Stevie sat
+    under classic_soul / deep_soul / gospel_soul — one unrecorded taxonomy edge
+    away. Two things have to hold for that to stay fixed, and they fail
+    independently: the taxonomy has to RECORD the edges, and membership resolution
+    has to WALK them. `test_taxonomy_descendants.py` covers the first against the
+    YAML; only a live-DB read covers the second.
+
+    Not marked `slow` — this is two sqlite queries, no generation, no artifact.
+    """
+    cfg = Config("config.yaml")
+    db_path = resolve_database_path(cfg)
+    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        family = genre_family_ids(con, "soul")
+        assert {"classic_soul", "deep_soul", "gospel_soul"} <= family
+
+        exact_only = seed_member_track_ids(con, {"soul"})
+        whole_family = seed_member_track_ids(con, family)
+    finally:
+        con.close()
+
+    # Exact members must survive the widening — the family is a superset, never a
+    # replacement.
+    assert exact_only <= whole_family
+    # An umbrella genre's membership must be dominated by its descendants, not by
+    # the residue of tracks someone happened to tag with the bare label.
+    assert len(whole_family) > 4 * len(exact_only), (
+        f"soul membership barely grew ({len(exact_only)} -> {len(whole_family)}): "
+        "the is_a walk is not reaching descendants on the live DB"
+    )

@@ -417,7 +417,7 @@ def test_genre_pool_threshold_matches_effective_cohesion_mode(
     captured: Dict[str, float] = {}
 
     def _fake_resolve_pool_with_relaxation(
-        conn, steering, genre_id, genre_name, *, start_threshold, steps, min_tracks
+        conn, steering, genre_ids, genre_name, *, start_threshold, steps, min_tracks
     ):
         captured["start_threshold"] = start_threshold
         raise _CapturedThreshold
