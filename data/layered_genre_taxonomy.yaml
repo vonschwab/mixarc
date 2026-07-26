@@ -1,5 +1,5 @@
 schema_version: 1
-taxonomy_version: 0.52.0-world-facets2
+taxonomy_version: 0.53.0-gui-20260724_200109-grown
 description: Conservative structured seed taxonomy for the Playlist Generator layered
   genre graph. Reviewed for schema consistency, fixture coverage, and conservative
   source-backed genre/facet policy; designed as sidecar/import input only.
@@ -34897,6 +34897,202 @@ records:
   source_policy: null
   possible_context_target: null
   notes: Spelling variant (growth).
+- name: speedcore
+  kind: subgenre
+  role: leaf
+  status: review
+  facet_type: null
+  specificity_score: 0.71
+  canonical_target: null
+  parent_edges:
+  - target: hardcore
+    edge_type: is_a
+    weight: 0.8
+    confidence: 0.85
+    notes: null
+  - target: electronic
+    edge_type: family_context
+    weight: 0.5
+    confidence: 0.75
+    notes: null
+  - target: breakbeat hardcore
+    edge_type: bridge_to
+    weight: 0.4
+    confidence: 0.6
+    notes: similar_to (growth)
+  - target: digital hardcore
+    edge_type: bridge_to
+    weight: 0.4
+    confidence: 0.6
+    notes: similar_to (growth)
+  - target: hardcore techno
+    edge_type: bridge_to
+    weight: 0.4
+    confidence: 0.6
+    notes: similar_to (growth)
+  - target: happy hardcore
+    edge_type: bridge_to
+    weight: 0.4
+    confidence: 0.6
+    notes: similar_to (growth)
+  secondary_roles: []
+  reject_reason: null
+  alias_policy: null
+  source_policy: growth
+  possible_context_target: null
+  notes: Speedcore is a documented electronic subgenre defined by extremely fast tempos
+    (160+ BPM, often 200+) and chaotic breakbeats, emerging from hardcore and jungle
+    cultures in the 1990s. It is distinct from related fast-hardcore subgenres by
+    its emphasis on extreme speed and abrasive, experimental sound design. Co-occurring
+    tags (electronic, hardcore, noise, experimental) align with the genre's aesthetic.
+    The examples reference 'early jungle rave and hardcore,' consistent with speedcore's
+    roots. Status 'review' reflects low album frequency (4) in this collection—speedcore
+    is legitimate but niche; examples warrant QA verification.
+- name: music
+  kind: reject
+  role: reject
+  status: rejected
+  facet_type: null
+  specificity_score: null
+  canonical_target: null
+  parent_edges: []
+  secondary_roles: []
+  reject_reason: source_noise
+  alias_policy: null
+  source_policy: growth
+  possible_context_target: null
+  notes: Rejected via taxonomy term adjudication.
+- name: female
+  kind: reject
+  role: reject
+  status: rejected
+  facet_type: null
+  specificity_score: null
+  canonical_target: null
+  parent_edges: []
+  secondary_roles: []
+  reject_reason: source_noise
+  alias_policy: null
+  source_policy: growth
+  possible_context_target: null
+  notes: Rejected via taxonomy term adjudication.
+- name: these tags suck
+  kind: reject
+  role: reject
+  status: rejected
+  facet_type: null
+  specificity_score: null
+  canonical_target: null
+  parent_edges: []
+  secondary_roles: []
+  reject_reason: source_noise
+  alias_policy: null
+  source_policy: growth
+  possible_context_target: null
+  notes: Rejected via taxonomy term adjudication.
+- name: chain punk
+  kind: reject
+  role: reject
+  status: rejected
+  facet_type: null
+  specificity_score: null
+  canonical_target: null
+  parent_edges: []
+  secondary_roles: []
+  reject_reason: source_noise
+  alias_policy: null
+  source_policy: growth
+  possible_context_target: null
+  notes: Appears on only 4 albums, all by a single artist (gee tee). No evidence of
+    an established genre, scene, or critical tradition. The cooccurring tags—synth
+    punk, garage punk, egg punk—already capture the musical style and are present
+    in the taxonomy. This appears to be an artist-specific or idiosyncratic descriptor
+    rather than a recognized subgenre. The prefix 'chain' has no established meaning
+    in punk or rock terminology.
+- name: finnish
+  kind: reject
+  role: reject
+  status: rejected
+  facet_type: null
+  specificity_score: null
+  canonical_target: null
+  parent_edges: []
+  secondary_roles: []
+  reject_reason: source_noise
+  alias_policy: null
+  source_policy: growth
+  possible_context_target: null
+  notes: Rejected via taxonomy term adjudication.
+- name: international anthem recording company
+  kind: reject
+  role: reject
+  status: rejected
+  facet_type: null
+  specificity_score: null
+  canonical_target: null
+  parent_edges: []
+  secondary_roles: []
+  reject_reason: label
+  alias_policy: null
+  source_policy: growth
+  possible_context_target: null
+  notes: Rejected via taxonomy term adjudication.
+- name: schranz
+  kind: reject
+  role: reject
+  status: rejected
+  facet_type: null
+  specificity_score: null
+  canonical_target: null
+  parent_edges: []
+  secondary_roles: []
+  reject_reason: source_noise
+  alias_policy: null
+  source_policy: growth
+  possible_context_target: null
+  notes: Rejected via taxonomy term adjudication.
+- name: post dubstep
+  kind: reject
+  role: reject
+  status: rejected
+  facet_type: null
+  specificity_score: null
+  canonical_target: null
+  parent_edges: []
+  secondary_roles: []
+  reject_reason: source_noise
+  alias_policy: null
+  source_policy: growth
+  possible_context_target: null
+  notes: Rejected via taxonomy term adjudication.
+- name: experimental indie
+  kind: reject
+  role: reject
+  status: rejected
+  facet_type: null
+  specificity_score: null
+  canonical_target: null
+  parent_edges: []
+  secondary_roles: []
+  reject_reason: source_noise
+  alias_policy: null
+  source_policy: growth
+  possible_context_target: null
+  notes: Rejected via taxonomy term adjudication.
+- name: small room
+  kind: reject
+  role: reject
+  status: rejected
+  facet_type: null
+  specificity_score: null
+  canonical_target: null
+  parent_edges: []
+  secondary_roles: []
+  reject_reason: source_noise
+  alias_policy: null
+  source_policy: growth
+  possible_context_target: null
+  notes: Rejected via taxonomy term adjudication.
 bridge_rules:
 - source: indie pop
   target: synth-pop
