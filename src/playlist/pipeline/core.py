@@ -1403,8 +1403,18 @@ def generate_playlist_ds(
     # Post-order validation: DS ordering must be final (no post-filtering).
     # Hard-invariant audit (Pass 1). These use the SAME values the beam enforced —
     # `max_per_artist` is the DERIVED cap from above, not the raw config literal,
-    # and `artist_identity_cfg` is the run's own cfg — so the validator cannot
-    # report a violation the beam never committed.
+    # and `artist_identity_cfg` is the run's own cfg.
+    #
+    # Matching VALUES is not sufficient; the SCOPE has to match too. This comment
+    # used to claim the validator "cannot report a violation the beam never
+    # committed", and that was wrong: min_gap governs what the beam places BETWEEN
+    # piers, but the validator checked every pair including pier-vs-pier, so artist
+    # mode flagged the seed artist against its own piers on every run with
+    # min_gap > pier spacing (Cut Worms, 2026-07-25 — positions [1,7,13,19,25,30] at
+    # min_gap=9, which needs 46 slots in a 30-track playlist). run_post_order_validation
+    # now derives pier positions from seed_track_ids_for_pier and exempts pier-vs-pier
+    # only. Note the cap already had this exemption via the single_artist branch above
+    # (max_artist_fraction_final=1.0); the gap check simply never got the equivalent.
     validation = run_post_order_validation(
         bundle=bundle,
         ordered_track_ids=ordered_track_ids,

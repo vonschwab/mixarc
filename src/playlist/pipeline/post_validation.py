@@ -133,7 +133,9 @@ class PostOrderValidation:
     warnings: List[str] = field(default_factory=list)
 
 
-def find_artist_gap_violations(identity_key_sets, min_gap: int) -> List[tuple]:
+def find_artist_gap_violations(
+    identity_key_sets, min_gap: int, *, pier_positions=None
+) -> List[tuple]:
     """Pairs of tracks closer than ``min_gap`` whose identity key sets INTERSECT.
 
     Returns ``(pos_i, pos_j, shared_key, gap)`` with 1-indexed positions.
@@ -145,6 +147,20 @@ def find_artist_gap_violations(identity_key_sets, min_gap: int) -> List[tuple]:
     for this purpose, and collapsing each track to a single string would silently
     miss that.
 
+    ``pier_positions`` (0-indexed) marks the STRUCTURAL ANCHORS. A pair is skipped
+    only when BOTH endpoints are piers, because min_gap never governed pier
+    placement: the beam places piers unconditionally from the topology and applies
+    min_gap to what it puts BETWEEN them (pier_bridge_builder.py — "piers are placed
+    unconditionally (never gated on novelty)"). In artist mode every pier is the
+    seed artist by construction, so checking pier-vs-pier reported the seed artist
+    against itself on every run. It was also unsatisfiable by arithmetic: P piers at
+    min_gap G need (P-1)*G+1 slots, and a 30-track Cut Worms playlist with 6 piers
+    and min_gap 9 would need 46. A guarantee no layout can meet is not a guarantee.
+
+    Pier-vs-bridge is deliberately still checked — a bridge track sharing the pier
+    artist inside an interior is a real ``disallow_pier_artists_in_interiors``
+    breach, not a structural artifact. So is bridge-vs-bridge.
+
     ``shared_key`` is the lexicographically smallest intersecting key so output is
     deterministic. ``min_gap <= 0`` disables the check.
     """
@@ -152,9 +168,12 @@ def find_artist_gap_violations(identity_key_sets, min_gap: int) -> List[tuple]:
     gap = int(min_gap)
     if gap <= 0:
         return []
+    piers = {int(p) for p in (pier_positions or ())}
     out: List[tuple] = []
     for i in range(len(sets)):
         for j in range(i + 1, min(i + gap, len(sets))):
+            if i in piers and j in piers:
+                continue
             shared = sets[i] & sets[j]
             if shared:
                 out.append((i + 1, j + 1, min(shared), j - i))
@@ -287,7 +306,17 @@ def run_post_order_validation(
 
     identities = _resolve_artist_identities(bundle, ordered_track_ids, artist_identity_cfg)
 
-    gap_violations = find_artist_gap_violations(identities, min_gap)
+    # Structural anchors. Computed here, never left to the caller: min_gap governs
+    # what the beam places BETWEEN piers, so a pier-vs-pier pair is not a breach —
+    # see find_artist_gap_violations. Forgetting this is what made artist mode
+    # report the seed artist against its own piers on every run.
+    pier_positions = [
+        i for i, tid in enumerate(ordered_track_ids) if str(tid) in pier_ids_set
+    ]
+
+    gap_violations = find_artist_gap_violations(
+        identities, min_gap, pier_positions=pier_positions
+    )
     if gap_violations:
         by_artist: Dict[str, List[int]] = {}
         for i, j, artist, _g in gap_violations:

@@ -80,6 +80,56 @@ def test_empty_identity_set_never_conflicts():
     assert find_artist_gap_violations([set(), set()], min_gap=9) == []
 
 
+
+# ── piers are structural anchors, not gap violations ─────────────────────────
+
+def test_artist_mode_piers_are_not_a_gap_violation():
+    """REGRESSION (Cut Worms, 2026-07-25): artist mode banner-flagged the seed
+    artist against its own piers on every run.
+
+    Positions [1, 7, 13, 19, 25, 30] with min_gap=9 — the real report. In artist
+    mode every pier IS the seed artist by construction, and min_gap governs what
+    the beam places BETWEEN piers, never pier placement itself.
+    """
+    tracks = [_s(f"bridge{i}") for i in range(30)]
+    pier_pos = [0, 6, 12, 18, 24, 29]          # 0-indexed
+    for p in pier_pos:
+        tracks[p] = _s("cut worms")
+
+    assert find_artist_gap_violations(tracks, min_gap=9) != [], "precondition: fires without the exemption"
+    assert find_artist_gap_violations(tracks, min_gap=9, pier_positions=pier_pos) == []
+
+
+def test_the_guarantee_was_arithmetically_unsatisfiable():
+    """Why this could never have been a real breach: P piers at min_gap G need
+    (P-1)*G+1 slots. Cut Worms needed 46 in a 30-track playlist."""
+    n_piers, gap, length = 6, 9, 30
+    assert (n_piers - 1) * gap + 1 > length
+
+
+def test_bridge_track_sharing_a_pier_artist_is_still_a_violation():
+    """The exemption must stay narrow: only pier-vs-pier is structural. A bridge
+    track by the pier artist inside an interior is a real
+    disallow_pier_artists_in_interiors breach."""
+    tracks = [_s(f"bridge{i}") for i in range(10)]
+    tracks[0] = _s("cut worms")      # pier
+    tracks[6] = _s("cut worms")      # pier
+    tracks[2] = _s("cut worms")      # BRIDGE by the pier artist -- must be caught
+    v = find_artist_gap_violations(tracks, min_gap=9, pier_positions=[0, 6])
+    pairs = {(i, j) for i, j, _a, _g in v}
+    assert (1, 3) in pairs and (3, 7) in pairs
+    assert (1, 7) not in pairs       # the pier-vs-pier pair stays exempt
+
+
+def test_bridge_vs_bridge_unaffected_by_pier_exemption():
+    tracks = [_s("a"), _s("b"), _s("a")]
+    assert len(find_artist_gap_violations(tracks, min_gap=9, pier_positions=[1])) == 1
+
+
+def test_no_pier_positions_preserves_prior_behaviour():
+    tracks = [_s("a"), _s("a")]
+    assert len(find_artist_gap_violations(tracks, min_gap=9)) == 1
+
 # ── cap ──────────────────────────────────────────────────────────────────────
 
 def test_cap_violation_detected():
