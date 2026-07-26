@@ -2806,7 +2806,20 @@ class PlaylistGenerator:
                 genre_name, resolution.name, resolution.genre_id,
             )
 
-            seed_member_ids = genre_mode.seed_member_track_ids(conn, resolution.genre_id)
+            # A track tagged `classic soul` IS soul: membership is the genre plus
+            # its transitive is_a descendants, read from the YAML taxonomy (the
+            # published tables lag it). Inert for leaf genres — they have no
+            # children — so this cannot regress a genre that already worked.
+            family_ids = genre_mode.genre_family_ids(conn, resolution.genre_id)
+            logger.info(
+                "stage=genre_seeds | genre=%s family=%d genre(s)%s",
+                resolution.genre_id, len(family_ids),
+                "" if len(family_ids) <= 1 else
+                ": " + ", ".join(sorted(family_ids - {resolution.genre_id})[:12])
+                + ("…" if len(family_ids) > 13 else ""),
+            )
+
+            seed_member_ids = genre_mode.seed_member_track_ids(conn, family_ids)
             if len(seed_member_ids) < 4:
                 logger.warning(
                     "Genre '%s' has only %d published tracks; need at least 4.",
@@ -2817,7 +2830,7 @@ class PlaylistGenerator:
             steering = get_taxonomy_steering()
             threshold = self._genre_pool_threshold(gp_cfg, cohesion_mode_effective)
             pool_ids, _sims, threshold_used = genre_mode.resolve_pool_with_relaxation(
-                conn, steering, resolution.genre_id, resolution.name,
+                conn, steering, family_ids, resolution.name,
                 start_threshold=threshold,
                 steps=gp_cfg.get("relaxation_steps", [0.35, 0.20, 0.10]),
                 min_tracks=max(int(track_count) * 8, 200),
@@ -2965,7 +2978,7 @@ class PlaylistGenerator:
             bundle, member_indices, popularity_cache_db_path()
         )
         centrality = genre_mode.centrality_by_index(
-            db_path, bundle, member_indices, resolution.genre_id
+            db_path, bundle, member_indices, family_ids
         )
         typicality = genre_mode.sonic_typicality(X_raw, member_indices)
 
@@ -3105,12 +3118,18 @@ class PlaylistGenerator:
                 _breakdown = genre_mode.pool_genre_breakdown(_bd_conn, set(_sims))
             finally:
                 _bd_conn.close()
-            _direct = next((n for g, n in _breakdown if g == resolution.genre_id), 0)
+            # Core = the whole is_a FAMILY, not the queried id alone. The veto fix
+            # bites in proportion to the core's share of its own pool (reggae 35% ->
+            # fixed, soul 5% -> unchanged), so counting only the exact id would
+            # under-report the core for every umbrella genre and make that ratio
+            # unreadable — which is the one number this line exists to show.
+            _direct = sum(n for g, n in _breakdown if g in family_ids)
             logger.info(
                 "stage=genre_pool | target=%s threshold=%.3f pool_tracks=%d | "
-                "direct_core=%d neighbour_contrib=%d | top_genres=%s",
+                "direct_core=%d (family of %d) neighbour_contrib=%d | top_genres=%s",
                 resolution.genre_id, threshold_used, len(pool_ids),
-                _direct, sum(n for g, n in _breakdown if g != resolution.genre_id),
+                _direct, len(family_ids),
+                sum(n for g, n in _breakdown if g not in family_ids),
                 [f"{g}:{n}" for g, n in _breakdown[:10]],
             )
         except Exception as exc:  # diagnostics must never break generation

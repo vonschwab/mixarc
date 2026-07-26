@@ -46,14 +46,33 @@ def canonical_names_by_id(conn: sqlite3.Connection) -> dict[str, str]:
     return {str(r[0]): str(r[1]) for r in rows}
 
 
-def seed_member_track_ids(conn: sqlite3.Connection, genre_id: str) -> set[str]:
-    """Exact-genre track ids eligible to be SEEDS (observed_leaf/legacy only).
+def genre_family_ids(conn: sqlite3.Connection, genre_id: str) -> set[str]:
+    """The genre plus its transitive ``is_a`` descendants — its true membership.
+
+    A track tagged `classic soul` IS soul. Seeding from the exact id alone left
+    umbrella genres hollow: soul's exact core was 214 tracks from 13 artists while
+    Marvin Gaye, Aretha and Stevie sat under child genres one edge away (see the
+    2026-07-25 taxonomy backfill). Leaf genres have no children, so this is inert
+    for them and cannot regress what already worked.
+    """
+    from src.genre.authority import descendant_genre_ids
+
+    return descendant_genre_ids(conn, genre_id)
+
+
+def seed_member_track_ids(conn: sqlite3.Connection, genre_ids: set[str]) -> set[str]:
+    """Track ids eligible to be SEEDS for ``genre_ids`` (observed_leaf/legacy only).
+
+    Takes the whole genre family — see ``genre_family_ids`` — not a single id. The
+    set is REQUIRED rather than defaulted to `{genre_id}`: a caller that forgets to
+    resolve the family must be visibly wrong, not silently back on exact-match
+    seeding (CLAUDE.md "Activate fixes; never default to legacy").
 
     Inferred layers are excluded: a pier must be unambiguously the genre.
     """
     from src.genre.authority import track_ids_for_genre_ids
 
-    return track_ids_for_genre_ids(conn, {genre_id})
+    return track_ids_for_genre_ids(conn, set(genre_ids))
 
 
 def neighbors_above_threshold(
@@ -78,27 +97,28 @@ def neighbors_above_threshold(
 def pool_track_ids(
     conn: sqlite3.Connection,
     steering,
-    genre_id: str,
+    genre_ids: set[str],
     genre_name: str,
     threshold: float,
 ) -> tuple[set[str], dict[str, float]]:
     """Bridge-pool track ids at ``threshold``, plus the genre_id -> similarity map.
 
-    The exact genre is always included at similarity 1.0, so an impossible threshold
-    degrades to exact-only rather than to an empty pool.
+    The genre family (``genre_ids``) is always pinned at similarity 1.0 — a
+    descendant IS the genre, so its own name-similarity score is irrelevant — which
+    also guarantees seeds are a subset of the pool. An impossible threshold
+    therefore degrades to family-only rather than to an empty pool.
     """
     from src.genre.authority import track_ids_for_genre_ids
 
-    sims = {genre_id: 1.0}
-    sims.update(
-        neighbors_above_threshold(
-            steering, genre_name, canonical_names_by_id(conn), threshold
-        )
+    family = {str(g) for g in genre_ids}
+    sims = neighbors_above_threshold(
+        steering, genre_name, canonical_names_by_id(conn), threshold
     )
+    sims.update({g: 1.0 for g in family})
     ids = track_ids_for_genre_ids(conn, set(sims))
     logger.info(
-        "stage=genre_pool | genre=%s threshold=%.2f genres=%d tracks=%d",
-        genre_id, float(threshold), len(sims), len(ids),
+        "stage=genre_pool | genre=%s threshold=%.2f family=%d genres=%d tracks=%d",
+        genre_name, float(threshold), len(family), len(sims), len(ids),
     )
     return ids, sims
 
@@ -180,7 +200,7 @@ def score_seed_candidates(
 def resolve_pool_with_relaxation(
     conn: sqlite3.Connection,
     steering,
-    genre_id: str,
+    genre_ids: set[str],
     genre_name: str,
     *,
     start_threshold: float,
@@ -201,7 +221,7 @@ def resolve_pool_with_relaxation(
     ]
     widest: tuple = (set(), {}, attempts[-1])
     for thr in attempts:
-        ids, sims = pool_track_ids(conn, steering, genre_id, genre_name, thr)
+        ids, sims = pool_track_ids(conn, steering, genre_ids, genre_name, thr)
         widest = (ids, sims, thr)
         if len(ids) >= int(min_tracks):
             logger.info(
@@ -216,7 +236,7 @@ def resolve_pool_with_relaxation(
     logger.warning(
         "stage=genre_pool | genre=%s starved: widest threshold=%.3f yields %d tracks "
         "(< %d). Generating from the widest pool.",
-        genre_id, widest[2], len(widest[0]), int(min_tracks),
+        genre_name, widest[2], len(widest[0]), int(min_tracks),
     )
     return widest
 
@@ -254,24 +274,33 @@ def canonicity_by_index(bundle, member_indices, popularity_db_path: str) -> dict
 
 
 def centrality_by_index(
-    db_path: str, bundle, member_indices, genre_id: str
+    db_path: str, bundle, member_indices, genre_ids: set[str]
 ) -> dict:
     """Bundle index -> genre purity in [0, 1].
 
     Authority confidence for the chosen genre, divided down by how many OTHER
     published genres the release carries: a release tagged only `shoegaze` is more
     purely shoegaze than one carrying eight tags (spec §3.2).
+
+    Matches the whole genre FAMILY, not just the queried id. Members now arrive via
+    transitive ``is_a`` descent, so a `classic soul` release asked about `soul`
+    would return NULL confidence and score 0.0 — silently zeroing the 0.75-weighted
+    centrality term for every descendant-sourced candidate.
     """
+    gids = {str(g) for g in (genre_ids or set())}
+    if not gids:
+        return {}
+    placeholders = ",".join("?" for _ in gids)
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     try:
         rows = conn.execute(
             "SELECT t.track_id, "
-            "       MAX(CASE WHEN reg.genre_id = ? THEN reg.confidence END) AS conf, "
+            f"       MAX(CASE WHEN reg.genre_id IN ({placeholders}) THEN reg.confidence END) AS conf, "
             "       COUNT(DISTINCT reg.genre_id) AS n_genres "
             "FROM tracks t JOIN release_effective_genres reg ON reg.album_id = t.album_id "
             "WHERE reg.assignment_layer IN ('observed_leaf', 'legacy') "
             "GROUP BY t.track_id",
-            (str(genre_id),),
+            tuple(gids),
         ).fetchall()
     except sqlite3.OperationalError:
         return {}

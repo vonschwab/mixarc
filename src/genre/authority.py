@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from functools import lru_cache
 
 
 @dataclass(frozen=True)
@@ -100,8 +99,18 @@ def genre_source_for_album(conn: sqlite3.Connection, album_id: str) -> str:
     return base[0] if base else "none"
 
 
-@lru_cache(maxsize=1)
 def _taxonomy():
+    """The live YAML taxonomy. Deliberately NOT lru_cached here.
+
+    ``load_layered_taxonomy`` already caches the parsed result keyed by the file's
+    content hash, so repeat calls re-read ~900KB and skip the parse. An lru_cache on
+    top of that would pin the taxonomy for the life of the process — and the GUI's
+    "Apply taxonomy decisions" rewrites the YAML mid-session, busting only
+    ``graph_adapter._cached_default_taxonomy``. A stale taxonomy here would silently
+    seed genre mode from the wrong is_a family, which is precisely the class of
+    "configured thing that can't act" this codebase treats as a bug. Reachable once
+    per generation; the read is not worth a staleness hazard.
+    """
     from src.ai_genre_enrichment.layered_taxonomy import load_default_layered_taxonomy
     return load_default_layered_taxonomy()
 
@@ -112,6 +121,18 @@ def parents_for(conn: sqlite3.Connection, genre_id: str) -> list[str]:
 
 def families_for(conn: sqlite3.Connection, genre_id: str) -> list[str]:
     return [g.genre_id for g in _taxonomy().families_for_genre(genre_id)]
+
+
+def descendant_genre_ids(conn: sqlite3.Connection, genre_id: str) -> set[str]:
+    """``genre_id`` plus every active genre that ``is_a``-descends from it.
+
+    Structure comes from the YAML taxonomy, NOT from ``genre_graph_edges``: the
+    published tables lag the YAML (the GUI's growth loop writes the YAML; publish
+    is a separate step), so reading edges from the DB would serve stale structure.
+    ``parents_for``/``families_for`` above already set that precedent. Membership
+    is still the DB's job — see ``track_ids_for_genre_ids``.
+    """
+    return set(_taxonomy().descendant_genre_ids(genre_id))
 
 
 def is_facet(conn: sqlite3.Connection, genre_id: str) -> bool:

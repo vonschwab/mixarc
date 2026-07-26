@@ -81,7 +81,15 @@ def test_resolve_unknown_returns_none(conn):
 
 def test_seed_members_exclude_inferred_layers(conn):
     # t5 is on an inferred_parent assignment and must NOT be a seed candidate.
-    assert genre_mode.seed_member_track_ids(conn, "shoegaze") == {"t1", "t2"}
+    assert genre_mode.seed_member_track_ids(conn, {"shoegaze"}) == {"t1", "t2"}
+
+
+def test_seed_members_union_the_whole_genre_family(conn):
+    # `dream_pop` standing in for a transitive is_a descendant: its tracks are
+    # members of the parent genre, not merely pool neighbours.
+    assert genre_mode.seed_member_track_ids(
+        conn, {"shoegaze", "dream_pop"}
+    ) == {"t1", "t2", "t3"}
 
 
 def test_neighbors_above_threshold_excludes_self_and_low(conn, steering):
@@ -100,11 +108,23 @@ def test_higher_threshold_narrows(conn, steering):
 
 
 def test_pool_includes_exact_plus_neighbors(conn, steering):
-    ids, sims = genre_mode.pool_track_ids(conn, steering, "shoegaze", "shoegaze", 0.5)
+    ids, sims = genre_mode.pool_track_ids(conn, steering, {"shoegaze"}, "shoegaze", 0.5)
     assert ids == {"t1", "t2", "t3"}      # shoegaze + dream_pop, not polka
     assert sims["shoegaze"] == 1.0
 
 
-def test_pool_at_impossible_threshold_is_exact_only(conn, steering):
-    ids, _ = genre_mode.pool_track_ids(conn, steering, "shoegaze", "shoegaze", 0.99)
+def test_pool_at_impossible_threshold_is_family_only(conn, steering):
+    ids, _ = genre_mode.pool_track_ids(conn, steering, {"shoegaze"}, "shoegaze", 0.99)
     assert ids == {"t1", "t2"}
+
+
+def test_family_members_are_pinned_at_similarity_one(conn, steering):
+    # polka scores 0.01 as a neighbour, far below the threshold. As a (contrived)
+    # family member it must still enter the pool at 1.0 — a descendant IS the
+    # genre, so its name-similarity score is irrelevant. This is also what
+    # guarantees seed members are a subset of the pool.
+    ids, sims = genre_mode.pool_track_ids(
+        conn, steering, {"shoegaze", "polka"}, "shoegaze", 0.5
+    )
+    assert sims["polka"] == 1.0
+    assert "t4" in ids

@@ -783,9 +783,16 @@ playlists:
 
 **What it does.** Genre mode's bridge pool is every OTHER genre scored by hub-damped taxonomy
 similarity (`TaxonomySteering.similarity`, the same scorer the beam's genre-arc router uses) to
-the ONE genre you picked, admitted above `similarity_threshold_<cohesion_mode>`. Seeds/piers stay
-exact-genre only (`release_effective_genres`, observed_leaf/legacy) — this knob only widens or
-narrows the BRIDGE material connecting those piers. There is no separate beam steering term for
+the genre FAMILY you picked, admitted above `similarity_threshold_<cohesion_mode>`.
+
+The **family** is the genre plus its transitive `is_a` descendants, read from
+`data/layered_genre_taxonomy.yaml` (never `genre_graph_edges` — the published tables lag the
+YAML). A track tagged `classic soul` IS soul, so it is a full member: eligible to be a pier, and
+pinned in the pool at similarity 1.0 regardless of its name-similarity score. That pinning is also
+what guarantees seeds are a subset of the pool. Seeds/piers remain observed-only
+(`release_effective_genres`, observed_leaf/legacy — never `inferred%`); this knob only widens or
+narrows the BRIDGE material connecting those piers. Leaf genres have no descendants, so the family
+is a no-op for them. There is no separate beam steering term for
 genre mode (spec §3.5) — every pier is the same genre, so the arc target collapses to one node and
 contributes nothing; **pool composition is the only lever**, which is why this single threshold is
 also the entire genre-mode differentiation surface between `strict`/`narrow`/`dynamic`/`discover`.
@@ -799,6 +806,22 @@ re-measured 2026-07-24 against the shipped `genre_mode.pool_track_ids`):
 | `post_punk` | 3,930 | 5,196 | 5,588 | 8,461 |
 | `hauntology` | 174 | 910 | 8,080 | 11,633 |
 | `dub_techno` | 71 | 71 | 576 | 1,760 |
+
+**Family sizes** (member tracks, taxonomy `0.53.3`) — how much the `is_a` walk adds. Umbrella
+genres are where it matters; the four genres above are all leaves or near-leaves, which is why
+their pool table is unchanged:
+
+| Genre | exact | family (transitive `is_a`) | descendant genres |
+|---|---|---|---|
+| `rock` | 126 | 15,712 | 44 |
+| `pop` | 237 | 12,546 | 32 |
+| `punk` | 91 | 6,577 | 23 |
+| `jazz` | 128 | 4,211 | 34 |
+| `folk` | 237 | 3,781 | 21 |
+| `soul` | 214 | 2,639 | 21 |
+| `metal` | 0 | 212 | 22 |
+| `reggae` | 206 | 336 | 3 |
+| `shoegaze` / `hauntology` / `dub_techno` | unchanged | unchanged | 1 / 0 / 0 |
 
 **Which direction to move it:**
 - **Playlist doesn't feel like the genre you picked (too diffuse)** → raise the active mode's
@@ -820,12 +843,13 @@ genre (never-fail on this soft axis). Every rung this fires is logged, so a star
 unexpectedly narrow genre run is diagnosable from the log alone:
 
 ```
-stage=genre_pool | genre=<id> threshold=0.35 genres=N tracks=T
+stage=genre_seeds | genre=<id> family=F genre(s): <descendant ids>
+stage=genre_pool | genre=<name> threshold=0.35 family=F genres=N tracks=T
 stage=genre_pool | relaxation step threshold=0.350 tracks=T < NEEDED — widening
 stage=genre_pool | relaxation settled threshold=0.200 tracks=T (needed NEEDED)
 ```
 
-(or, if every rung was exhausted: `stage=genre_pool | genre=<id> starved: widest threshold=...
+(or, if every rung was exhausted: `stage=genre_pool | genre=<name> starved: widest threshold=...
 yields N tracks (< NEEDED). Generating from the widest pool.`) — grep `stage=genre_pool` in the
 per-playlist log (`logs/playlists/`) to see exactly which rung a given generation settled on.
 `stage=genre_seeds` (same log) shows the cluster count and the piers realized after the

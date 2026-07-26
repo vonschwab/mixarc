@@ -57,7 +57,7 @@ import pytest
 
 from src.config_loader import Config, resolve_database_path
 from src.local_library_client import LocalLibraryClient
-from src.playlist.genre_mode import seed_member_track_ids
+from src.playlist.genre_mode import genre_family_ids, seed_member_track_ids
 from src.playlist_generator import PlaylistGenerator
 from tests.support.gui_fidelity import resolved_artifact_path
 
@@ -86,15 +86,19 @@ def _genre_generator(config_path: str = "config.yaml") -> PlaylistGenerator:
 
 
 def _exact_genre_member_ids(genre_id: str, db_path: str) -> set[str]:
-    """Independent authority re-read: exact-genre track ids for a HARDCODED
-    ``genre_id`` (never one recovered via ``resolve_genre_query``/
-    ``canonical_genre_search``), so this cannot pass merely because the resolver
-    agreed with itself. Mirrors the independent-re-read pattern in
-    test_gui_fidelity_regressions.py's ``_authority_on_tag_ids``.
+    """Independent authority re-read: member track ids for a HARDCODED ``genre_id``
+    (never one recovered via ``resolve_genre_query``/``canonical_genre_search``), so
+    this cannot pass merely because the resolver agreed with itself. Mirrors the
+    independent-re-read pattern in test_gui_fidelity_regressions.py's
+    ``_authority_on_tag_ids``.
+
+    Membership is the genre's transitive ``is_a`` family, matching what generation
+    now seeds from. The negative control still holds: `funk_metal` is not a funk
+    descendant, so a funk_metal pool still has zero overlap with funk.
     """
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     try:
-        return seed_member_track_ids(con, genre_id)
+        return seed_member_track_ids(con, genre_family_ids(con, genre_id))
     finally:
         con.close()
 
