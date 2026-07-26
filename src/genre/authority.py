@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from functools import lru_cache
 
 
 @dataclass(frozen=True)
@@ -100,8 +99,18 @@ def genre_source_for_album(conn: sqlite3.Connection, album_id: str) -> str:
     return base[0] if base else "none"
 
 
-@lru_cache(maxsize=1)
 def _taxonomy():
+    """The live YAML taxonomy. Deliberately NOT lru_cached here.
+
+    ``load_layered_taxonomy`` already caches the parsed result keyed by the file's
+    content hash, so repeat calls re-read ~900KB and skip the parse. An lru_cache on
+    top of that would pin the taxonomy for the life of the process — and the GUI's
+    "Apply taxonomy decisions" rewrites the YAML mid-session, busting only
+    ``graph_adapter._cached_default_taxonomy``. A stale taxonomy here would silently
+    seed genre mode from the wrong is_a family, which is precisely the class of
+    "configured thing that can't act" this codebase treats as a bug. Reachable once
+    per generation; the read is not worth a staleness hazard.
+    """
     from src.ai_genre_enrichment.layered_taxonomy import load_default_layered_taxonomy
     return load_default_layered_taxonomy()
 
@@ -114,6 +123,18 @@ def families_for(conn: sqlite3.Connection, genre_id: str) -> list[str]:
     return [g.genre_id for g in _taxonomy().families_for_genre(genre_id)]
 
 
+def descendant_genre_ids(conn: sqlite3.Connection, genre_id: str) -> set[str]:
+    """``genre_id`` plus every active genre that ``is_a``-descends from it.
+
+    Structure comes from the YAML taxonomy, NOT from ``genre_graph_edges``: the
+    published tables lag the YAML (the GUI's growth loop writes the YAML; publish
+    is a separate step), so reading edges from the DB would serve stale structure.
+    ``parents_for``/``families_for`` above already set that precedent. Membership
+    is still the DB's job — see ``track_ids_for_genre_ids``.
+    """
+    return set(_taxonomy().descendant_genre_ids(genre_id))
+
+
 def is_facet(conn: sqlite3.Connection, genre_id: str) -> bool:
     return _taxonomy().facet_by_id(genre_id) is not None
 
@@ -121,19 +142,44 @@ def is_facet(conn: sqlite3.Connection, genre_id: str) -> bool:
 def canonical_genre_search(
     conn: sqlite3.Connection, query: str, limit: int = 20
 ) -> list[tuple[str, str]]:
-    """Active canonical genres whose name contains ``query`` (case-insensitive).
+    """Active canonical genres matching ``query`` by canonical name OR alias.
 
-    Returns ``(genre_id, name)`` ordered most-specific first. Used by the genre
-    edit autocomplete so only real taxonomy genres can be added.
+    Returns ``(genre_id, canonical_name)`` — always the canonical name, even when
+    the hit came from an alias, so a pick is always a real taxonomy genre. Ordered
+    exact matches first (a query equal to a canonical name or alias, case-
+    insensitive), then canonical-name matches before alias matches, then
+    most-specific first. Deduped by genre_id.
+
+    The exact-match tier exists because ``specificity_score`` alone can rank a
+    more specific *substring* match above the literal query: querying "funk"
+    against `funk` (specificity 0.58) and `funk metal` (specificity 0.80, matches
+    via the same `%funk%` substring) returned `funk metal` first pre-fix — found
+    via genre mode's acceptance run (2026-07-24), where typing the exact genre
+    name silently generated a different, more specific genre instead.
     """
     q = (query or "").strip()
     if not q:
         return []
     rows = conn.execute(
-        "SELECT genre_id, name FROM genre_graph_canonical_genres "
-        "WHERE status = 'active' AND LOWER(name) LIKE '%' || LOWER(?) || '%' "
-        "ORDER BY specificity_score DESC, name ASC LIMIT ?",
-        (q, limit),
+        "SELECT g.genre_id, g.name, MIN(m.via_alias) AS via_alias, "
+        "MAX(m.is_exact) AS is_exact "
+        "FROM ("
+        "  SELECT genre_id, 0 AS via_alias, "
+        "         CASE WHEN LOWER(name) = LOWER(?) THEN 1 ELSE 0 END AS is_exact "
+        "  FROM genre_graph_canonical_genres "
+        "   WHERE LOWER(name) LIKE '%' || LOWER(?) || '%' "
+        "  UNION ALL "
+        "  SELECT canonical_genre_id AS genre_id, 1 AS via_alias, "
+        "         CASE WHEN LOWER(alias) = LOWER(?) THEN 1 ELSE 0 END AS is_exact "
+        "  FROM genre_graph_aliases "
+        "   WHERE LOWER(alias) LIKE '%' || LOWER(?) || '%' "
+        ") m "
+        "JOIN genre_graph_canonical_genres g ON g.genre_id = m.genre_id "
+        "WHERE g.status = 'active' "
+        "GROUP BY g.genre_id, g.name "
+        "ORDER BY is_exact DESC, via_alias ASC, g.specificity_score DESC, g.name ASC "
+        "LIMIT ?",
+        (q, q, q, q, limit),
     ).fetchall()
     return [(r[0], r[1]) for r in rows]
 
@@ -233,3 +279,32 @@ def on_tag_track_ids_for_artist(
     except sqlite3.OperationalError:
         return {}
     return {str(r[0]): int(r[1]) for r in rows}
+
+
+def track_ids_for_genre_ids(
+    conn: sqlite3.Connection,
+    genre_ids: set[str],
+    *,
+    layers: tuple[str, ...] = ("observed_leaf", "legacy"),
+) -> set[str]:
+    """Track ids whose album is published with ANY of ``genre_ids`` at ``layers``.
+
+    Union semantics. Returns an empty set for empty input or absent tables — callers
+    fall back rather than crash. THE authority path: joins tracks.album_id against
+    release_effective_genres, never a raw *_genres table.
+    """
+    gids = {str(g) for g in (genre_ids or set()) if str(g)}
+    if not gids:
+        return set()
+    gph = ",".join("?" for _ in gids)
+    lph = ",".join("?" for _ in layers)
+    try:
+        rows = conn.execute(
+            f"SELECT DISTINCT t.track_id FROM tracks t "
+            f"JOIN release_effective_genres reg ON reg.album_id = t.album_id "
+            f"WHERE reg.genre_id IN ({gph}) AND reg.assignment_layer IN ({lph})",
+            (*gids, *layers),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return set()
+    return {str(r[0]) for r in rows}

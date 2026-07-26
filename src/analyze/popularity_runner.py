@@ -136,6 +136,44 @@ def resolve_top_tracks_to_popularity(
     }
 
 
+def artist_prominence(db_path: str, artist_keys: set) -> Dict[str, float]:
+    """Normalized artist_key -> cross-artist prominence in [0, 1].
+
+    Derived from the MAX `listeners` across the artist's cached Last.fm top tracks,
+    log-scaled (the raw range spans ~4 orders of magnitude: 1.6M for Slowdive vs
+    ~300 for a Bandcamp band) and min-max normalized across the requested set.
+
+    This is the cross-artist signal `1 - rank/N` cannot provide — rank is WITHIN
+    artist. See spec 2026-07-24-genre-mode-design.md §3.3.
+
+    An artist absent from the cache is OMITTED from the result, never scored 0.0:
+    Last.fm coverage is lazily populated (29% for funk vs 89% for shoegaze), so
+    scoring uncached artists at the bottom would silently exclude most of a genre.
+    Callers must treat a missing key as "no signal", not "unpopular".
+    """
+    import math
+
+    keys = {str(k) for k in (artist_keys or set()) if str(k)}
+    if not keys:
+        return {}
+    raw: Dict[str, float] = {}
+    for key in keys:
+        try:
+            top = get_artist_top_tracks_cached(db_path, key)
+            listeners = [int(t.get("listeners") or 0) for t in (top or [])]
+        except Exception:
+            continue
+        best = max(listeners) if listeners else 0
+        if best > 0:
+            raw[key] = math.log10(float(best))
+    if not raw:
+        return {}
+    lo, hi = min(raw.values()), max(raw.values())
+    if hi - lo < 1e-9:
+        return {k: 1.0 for k in raw}
+    return {k: (v - lo) / (hi - lo) for k, v in raw.items()}
+
+
 def log_seed_popularity(
     artist_name: str,
     pier_track_ids: Sequence[str],

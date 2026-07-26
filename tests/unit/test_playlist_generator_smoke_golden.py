@@ -14,9 +14,11 @@ golden file and re-run (the test will write a new baseline and skip).
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import numpy as np
 import pytest
 
 # Factory helpers live in the top-level tests/ package so they can be reused
@@ -24,6 +26,110 @@ import pytest
 from tests.conftest_playlist_generator import SYNTHETIC_TRACKS, make_synthetic_generator
 
 GOLDEN_DIR = Path(__file__).parent / "goldens" / "playlist_generator"
+
+# ---------------------------------------------------------------------------
+# Genre-mode fixture: create_playlist_for_genre now resolves against the real
+# genre authority (release_effective_genres) and clusters a real artifact
+# bundle *before* the DS pipeline is ever called, so — unlike artist/seed
+# mode — mocking _maybe_generate_ds_playlist alone is not enough to isolate
+# this scenario. Without a real (if tiny) DB + bundle, config.get('library',
+# 'database_path', ...) on the blanket MagicMock falls through
+# resolve_database_path's default and silently opens the REAL
+# data/metadata.db read-only — never a write risk, but not a hermetic unit
+# test. Build a minimal on-disk genre authority DB + an in-memory
+# ArtifactBundle instead, matching the schema already proven by
+# tests/unit/test_genre_mode_membership.py.
+# ---------------------------------------------------------------------------
+
+_GENRE_TRACK_IDS = ["g0", "g1", "g2", "g3", "g4", "g5", "g6", "g7", "g8"]
+_GENRE_ARTISTS = {
+    "g0": "Ambient One", "g1": "Ambient One", "g2": "Ambient One",
+    "g3": "Ambient Two", "g4": "Ambient Two", "g5": "Ambient Two",
+    "g6": "Ambient Three", "g7": "Ambient Three", "g8": "Ambient Three",
+}
+
+
+def _build_genre_smoke_db(db_path: Path) -> None:
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "CREATE TABLE genre_graph_canonical_genres "
+        "(genre_id TEXT, name TEXT, kind TEXT, specificity_score REAL, "
+        " status TEXT, taxonomy_version TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE genre_graph_aliases "
+        "(alias TEXT, canonical_genre_id TEXT, source TEXT, confidence REAL)"
+    )
+    conn.execute("CREATE TABLE tracks (track_id TEXT, artist TEXT, album TEXT, album_id TEXT)")
+    conn.execute(
+        "CREATE TABLE release_effective_genres "
+        "(album_id TEXT, release_key TEXT, genre_id TEXT, assignment_layer TEXT, "
+        " confidence REAL, source TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO genre_graph_canonical_genres VALUES (?,?,?,?,?,?)",
+        ("ambient", "ambient", "genre", 0.8, "active", "1"),
+    )
+    conn.executemany(
+        "INSERT INTO tracks VALUES (?,?,?,?)",
+        [
+            (tid, artist, f"Album {artist}", f"alb_{tid}")
+            for tid, artist in _GENRE_ARTISTS.items()
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO release_effective_genres VALUES (?,?,?,?,?,?)",
+        [
+            (f"alb_{tid}", f"k_{tid}", "ambient", "observed_leaf", 0.85, "file")
+            for tid in _GENRE_TRACK_IDS
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+
+def _build_genre_smoke_bundle():
+    """A tiny real ArtifactBundle: 3 well-separated sonic clusters, one per
+    artist, so cluster_artist_tracks (real k-means + pier-bridgeability veto)
+    runs its actual logic instead of being mocked away."""
+    from src.features.artifacts import ArtifactBundle
+    from src.string_utils import normalize_artist_key
+
+    rng = np.random.default_rng(0)
+    centers = {
+        "g0": [5, 0, 0], "g1": [5, 0, 0], "g2": [5, 0, 0],
+        "g3": [0, 5, 0], "g4": [0, 5, 0], "g5": [0, 5, 0],
+        "g6": [0, 0, 5], "g7": [0, 0, 5], "g8": [0, 0, 5],
+    }
+    X = np.zeros((len(_GENRE_TRACK_IDS), 3), dtype=np.float64)
+    for i, tid in enumerate(_GENRE_TRACK_IDS):
+        X[i] = np.asarray(centers[tid], dtype=np.float64) + rng.normal(scale=0.05, size=3)
+
+    track_ids = np.array(_GENRE_TRACK_IDS)
+    artist_names = np.array([_GENRE_ARTISTS[t] for t in _GENRE_TRACK_IDS])
+    artist_keys = np.array([normalize_artist_key(a) for a in artist_names])
+    titles = np.array([f"Track {t}" for t in _GENRE_TRACK_IDS])
+    durations_ms = np.array([180_000] * len(_GENRE_TRACK_IDS))
+    genre_vocab = np.array(["placeholder"])
+    X_genre = np.zeros((len(_GENRE_TRACK_IDS), 1), dtype=np.float64)
+
+    return ArtifactBundle(
+        artifact_path=Path("synthetic-genre-bundle"),
+        track_ids=track_ids,
+        artist_keys=artist_keys,
+        track_artists=artist_names,
+        track_titles=titles,
+        X_sonic=X,
+        X_sonic_start=None,
+        X_sonic_mid=None,
+        X_sonic_end=None,
+        X_genre_raw=X_genre,
+        X_genre_smoothed=X_genre,
+        genre_vocab=genre_vocab,
+        track_id_to_index={str(t): i for i, t in enumerate(track_ids)},
+        durations_ms=durations_ms,
+    )
+
 
 # ---------------------------------------------------------------------------
 # Synthetic DS result — what _maybe_generate_ds_playlist returns
@@ -38,7 +144,7 @@ SYNTHETIC_DS_TRACKS: List[Dict[str, Any]] = list(SYNTHETIC_TRACKS[:8])
 
 
 @pytest.fixture()
-def smoke_generator(monkeypatch):
+def smoke_generator(monkeypatch, tmp_path):
     """
     Return a PlaylistGenerator with all I/O stubbed out.
 
@@ -46,6 +152,12 @@ def smoke_generator(monkeypatch):
     _post_order_validate_ds_output → no-op (we trust the golden to catch regressions)
     _compute_edge_scores_from_artifact → [] (no artifact on disk)
     _print_playlist_report → no-op (suppress console output)
+
+    genre_basic additionally needs a real (tiny) genre-authority DB + artifact
+    bundle, since create_playlist_for_genre resolves + clusters BEFORE the
+    (mocked) DS call. Wired unconditionally here — harmless to artist_basic /
+    seed_list_basic, which never reach config.get('library', 'database_path')
+    or load_artifact_bundle (DS pipeline is fully mocked out for them too).
     """
     gen = make_synthetic_generator()
 
@@ -72,6 +184,62 @@ def smoke_generator(monkeypatch):
         "_print_playlist_report",
         lambda *args, **kwargs: None,
         raising=False,
+    )
+
+    # --- genre-mode wiring (see module docstring above) ---
+    genre_db_path = tmp_path / "genre_smoke.db"
+    _build_genre_smoke_db(genre_db_path)
+
+    def _cfg_get(*args, **kwargs):
+        if args[:2] == ("library", "database_path"):
+            return str(genre_db_path)
+        if args[:2] == ("playlists", "ds_pipeline"):
+            # random_seed=2 is the value empirically verified (see task-6
+            # report) to split this fixture's 9 members into three clean
+            # 3-member/one-artist-each clusters under the real k-means.
+            return {"artifact_path": "synthetic-genre-bundle", "random_seed": 2}
+        if args[:2] == ("playlists", "min_track_duration_seconds"):
+            return kwargs.get("default", 46)
+        if args[:2] == ("playlists", "max_track_duration_seconds"):
+            return kwargs.get("default", 720)
+        return {}
+
+    gen.config.get.side_effect = _cfg_get
+
+    genre_bundle = _build_genre_smoke_bundle()
+    monkeypatch.setattr(
+        "src.playlist_generator.load_artifact_bundle",
+        lambda *args, **kwargs: genre_bundle,
+    )
+
+    # Real taxonomy steering would load data/layered_genre_taxonomy.yaml from
+    # disk; genre_basic's single canonical genre never has a neighbor to
+    # score (self-excluded), so a trivial stub keeps this a hermetic unit test.
+    class _NullSteering:
+        def similarity(self, a, b):
+            return 1.0 if a == b else 0.0
+
+    monkeypatch.setattr(
+        "src.playlist.pier_bridge.taxonomy_steering.get_taxonomy_steering",
+        lambda *args, **kwargs: _NullSteering(),
+    )
+
+    by_id = {t["rating_key"]: t for t in SYNTHETIC_TRACKS}
+    by_id.update({
+        tid: {
+            "rating_key": tid,
+            "artist": _GENRE_ARTISTS[tid],
+            "artist_key": tid,
+            "title": f"Track {tid}",
+            "album": f"Album {_GENRE_ARTISTS[tid]}",
+            "duration": 180_000,
+            "file_path": f"/music/{tid}.mp3",
+            "mbid": None,
+        }
+        for tid in _GENRE_TRACK_IDS
+    })
+    gen.library.get_tracks_by_ids.side_effect = (
+        lambda ids: [by_id[str(i)] for i in ids if str(i) in by_id]
     )
 
     return gen
@@ -205,4 +373,65 @@ def test_playlist_generator_smoke_golden(scenario_name, smoke_generator, request
     assert snapshot["track_count"] == expected["track_count"], (
         f"[{scenario_name}] track_count changed: "
         f"{snapshot['track_count']} vs {expected['track_count']}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Regression: the genre bridge-pool threshold must be computed from the SAME
+# effective cohesion mode the beam later runs with — not from the raw
+# cohesion_mode_override parameter, which is None on a plain `--genre` CLI
+# call with no `--cohesion-mode` flag. Before the fix, a None override made
+# _genre_pool_threshold silently default to 'dynamic' (0.35) regardless of
+# what playlists.cohesion_mode in config.yaml actually resolved to for the
+# beam (e.g. 'strict', 0.50) — a configured knob that couldn't act. Pin it
+# with a NON-dynamic configured mode: a dynamic-only test would pass by
+# coincidence and reproduce the exact blind spot that let this ship.
+# ---------------------------------------------------------------------------
+
+
+class _CapturedThreshold(Exception):
+    """Raised by the resolve_pool_with_relaxation stub once it has recorded
+    the threshold it was called with, to short-circuit the rest of
+    create_playlist_for_genre (artifact loading, clustering, etc.) — this
+    test only needs to observe one call argument, not run a full generation.
+    """
+
+
+@pytest.mark.parametrize(
+    "configured_mode, expected_threshold",
+    [
+        ("strict", 0.50),
+        ("narrow", 0.42),
+    ],
+)
+def test_genre_pool_threshold_matches_effective_cohesion_mode(
+    monkeypatch, smoke_generator, configured_mode, expected_threshold
+):
+    gen = smoke_generator
+    # cohesion_mode_override is left at its default (None) — the exact CLI
+    # shape that hid the bug (main_app.py passes None through with no
+    # --cohesion-mode flag). playlists.cohesion_mode is the only place a
+    # non-dynamic mode can come from in that case.
+    gen.config.config = {"playlists": {"cohesion_mode": configured_mode}}
+
+    captured: Dict[str, float] = {}
+
+    def _fake_resolve_pool_with_relaxation(
+        conn, steering, genre_ids, genre_name, *, start_threshold, steps, min_tracks
+    ):
+        captured["start_threshold"] = start_threshold
+        raise _CapturedThreshold
+
+    monkeypatch.setattr(
+        "src.playlist.genre_mode.resolve_pool_with_relaxation",
+        _fake_resolve_pool_with_relaxation,
+    )
+
+    with pytest.raises(_CapturedThreshold):
+        gen.create_playlist_for_genre(genre_name="ambient", track_count=8)
+
+    assert captured["start_threshold"] == pytest.approx(expected_threshold), (
+        f"pool threshold used {captured['start_threshold']} but the beam's "
+        f"effective cohesion_mode is {configured_mode!r} (expected "
+        f"{expected_threshold}) — pool and beam disagree on cohesion mode"
     )

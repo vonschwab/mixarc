@@ -1566,3 +1566,89 @@ def test_reorder_avoiding_low_support_terminal_tie_break_deterministic():
     result, changed = reorder_avoiding_low_support_terminal(order, support, Xn)
     assert changed is True
     assert result[0] != 0 and result[-1] != 0
+
+
+def _member_indices_fixture():
+    """12-track bundle: indices 0-5 span three artists (a/b/c) forming three
+    well-separated 2-point sonic clusters; indices 6-11 belong to 'Test Artist'
+    and mirror the same three clusters, for the default-path test."""
+    artist_keys = np.array(
+        ["a", "a", "b", "b", "c", "c"]
+        + ["Test Artist"] * 6
+    )
+    track_ids = np.array([str(i) for i in range(12)])
+    cluster_pattern = [
+        [1.0, 0.0], [0.95, 0.05],
+        [0.0, 1.0], [0.05, 0.95],
+        [-1.0, 0.0], [-0.95, -0.05],
+    ]
+    X = np.array(cluster_pattern + cluster_pattern)
+    return DummyBundle(X_sonic=X, artist_keys=artist_keys, track_ids=track_ids)
+
+
+def test_member_indices_overrides_artist_scoping(monkeypatch):
+    """member_indices replaces artist-derived scoping; artist_name is only a label."""
+    import src.playlist.artist_style as art
+
+    called = {"n": 0}
+
+    def _boom(*a, **k):
+        called["n"] += 1
+        raise AssertionError("artist scoping must not run when member_indices is given")
+
+    monkeypatch.setattr(art, "_artist_indices_in_bundle", _boom)
+
+    bundle = _member_indices_fixture()
+    cfg = art.ArtistStyleConfig(pier_bridgeability_enabled=False, dedupe_versions=False)
+    clusters, medoids, _, _, _ = art.cluster_artist_tracks(
+        bundle=bundle, artist_name="ignored", cfg=cfg,
+        member_indices=[0, 1, 2, 3, 4, 5], target_pier_count=2,
+    )
+    assert called["n"] == 0
+    assert set(i for c in clusters for i in c) <= {0, 1, 2, 3, 4, 5}
+    assert medoids
+
+
+def test_member_indices_none_is_unchanged(monkeypatch):
+    """Default path still derives indices from the artist name."""
+    import src.playlist.artist_style as art
+    seen = {}
+    real = art._artist_indices_in_bundle
+
+    def _spy(bundle, name, **k):
+        seen["name"] = name
+        return real(bundle, name, **k)
+
+    monkeypatch.setattr(art, "_artist_indices_in_bundle", _spy)
+
+    bundle = _member_indices_fixture()
+    cfg = art.ArtistStyleConfig(pier_bridgeability_enabled=False, dedupe_versions=False)
+    art.cluster_artist_tracks(bundle=bundle, artist_name="Test Artist", cfg=cfg)
+    assert seen["name"] == "Test Artist"
+
+
+def test_member_indices_bridgeability_excludes_member_set_not_artist_name(monkeypatch):
+    """The pier-bridgeability veto must exclude the caller-supplied member set,
+    not re-derive from artist_name. In genre mode artist_name is a label like
+    "[genre:shoegaze]" that matches no real artist key -- re-deriving from it
+    silently returns [], which lets a track look bridgeable purely via its own
+    (unexcluded) album-mates."""
+    import src.playlist.artist_style as art
+
+    real_compute = art.compute_pier_bridgeability
+    captured = {}
+
+    def _spy(X_norm, member_indices_arg, excluded_indices, k, **kwargs):
+        captured["excluded"] = sorted(int(i) for i in excluded_indices)
+        return real_compute(X_norm, member_indices_arg, excluded_indices, k, **kwargs)
+
+    monkeypatch.setattr(art, "compute_pier_bridgeability", _spy)
+
+    bundle = _member_indices_fixture()
+    cfg = art.ArtistStyleConfig(pier_bridgeability_enabled=True, dedupe_versions=False)
+    art.cluster_artist_tracks(
+        bundle=bundle, artist_name="[genre:test]", cfg=cfg,
+        member_indices=[0, 1, 2, 3, 4, 5], target_pier_count=2,
+    )
+    assert "excluded" in captured, "compute_pier_bridgeability was never called"
+    assert captured["excluded"] == [0, 1, 2, 3, 4, 5]

@@ -763,6 +763,108 @@ a tuning recipe for opting in deliberately, not evidence the feature should ship
 
 ---
 
+## Knob 12: genre-mode pool breadth (`playlists.genre_playlist`)
+
+**Use when:** a genre-picked playlist (spec
+`docs/superpowers/specs/2026-07-24-genre-mode-design.md`) feels too diffuse (drifting into
+adjacent genres that don't feel like the one you asked for) or too repetitive (the same handful
+of artists/tracks every regeneration, or generation frequently hits the relaxation ladder on a
+thin genre).
+
+```yaml
+playlists:
+  genre_playlist:
+    similarity_threshold_strict: 0.50
+    similarity_threshold_narrow: 0.42
+    similarity_threshold_dynamic: 0.35
+    similarity_threshold_discover: 0.20
+    relaxation_steps: [0.35, 0.20, 0.10]
+```
+
+**What it does.** Genre mode's bridge pool is every OTHER genre scored by hub-damped taxonomy
+similarity (`TaxonomySteering.similarity`, the same scorer the beam's genre-arc router uses) to
+the genre FAMILY you picked, admitted above `similarity_threshold_<cohesion_mode>`.
+
+The **family** is the genre plus its transitive `is_a` descendants, read from
+`data/layered_genre_taxonomy.yaml` (never `genre_graph_edges` — the published tables lag the
+YAML). A track tagged `classic soul` IS soul, so it is a full member: eligible to be a pier, and
+pinned in the pool at similarity 1.0 regardless of its name-similarity score. That pinning is also
+what guarantees seeds are a subset of the pool. Seeds/piers remain observed-only
+(`release_effective_genres`, observed_leaf/legacy — never `inferred%`); this knob only widens or
+narrows the BRIDGE material connecting those piers. Leaf genres have no descendants, so the family
+is a no-op for them. There is no separate beam steering term for
+genre mode (spec §3.5) — every pier is the same genre, so the arc target collapses to one node and
+contributes nothing; **pool composition is the only lever**, which is why this single threshold is
+also the entire genre-mode differentiation surface between `strict`/`narrow`/`dynamic`/`discover`.
+
+**Measured pool sizes** (distinct tracks, `assignment_layer NOT LIKE 'inferred%'`, spec §3.1,
+re-measured 2026-07-24 against the shipped `genre_mode.pool_track_ids`):
+
+| Genre | exact (piers only) | thr 0.50 | thr 0.35 | thr 0.20 |
+|---|---|---|---|---|
+| `shoegaze` | 2,842 | 6,545 | 7,322 | 17,021 |
+| `post_punk` | 3,930 | 5,196 | 5,588 | 8,461 |
+| `hauntology` | 174 | 910 | 8,080 | 11,633 |
+| `dub_techno` | 71 | 71 | 576 | 1,760 |
+
+**Family sizes** (member tracks, taxonomy `0.53.3`) — how much the `is_a` walk adds. Umbrella
+genres are where it matters; the four genres above are all leaves or near-leaves, which is why
+their pool table is unchanged:
+
+| Genre | exact | family (transitive `is_a`) | descendant genres |
+|---|---|---|---|
+| `rock` | 126 | 15,712 | 44 |
+| `pop` | 237 | 12,546 | 32 |
+| `punk` | 91 | 6,577 | 23 |
+| `jazz` | 128 | 4,211 | 34 |
+| `folk` | 237 | 3,781 | 21 |
+| `soul` | 214 | 2,639 | 21 |
+| `metal` | 0 | 212 | 22 |
+| `reggae` | 206 | 336 | 3 |
+| `shoegaze` / `hauntology` / `dub_techno` | unchanged | unchanged | 1 / 0 / 0 |
+
+**Which direction to move it:**
+- **Playlist doesn't feel like the genre you picked (too diffuse)** → raise the active mode's
+  threshold (e.g. `similarity_threshold_dynamic: 0.35 -> 0.45`). Fewer neighbor genres qualify for
+  the bridge pool, so more of the playlist stays sonically/taxonomically close to the exact genre.
+- **Same few artists every regeneration, or generation keeps hitting the relaxation ladder (too
+  repetitive / too tight)** → lower the threshold, or widen `relaxation_steps` downward (add a
+  lower rung, e.g. `0.05`). More neighbor genres qualify, giving the beam and the cluster-then-rank
+  seed selector (spec §3.2) more material to route through and pick piers from.
+- `dub_techno`-shaped genres (few neighbors even at 0.50) are the case relaxation exists for —
+  don't chase them by permanently lowering the base threshold for every genre; let the ladder do
+  its job per-genre instead.
+
+**Starvation relaxation is the same dial, stepped down** — not a separate mechanism. If the
+pool at the mode's threshold doesn't support `max(track_count * 8, 200)` tracks, the code steps
+down through `relaxation_steps` (only rungs below the starting threshold; already-below rungs are
+skipped) until a rung clears the bar, or falls back to the widest rung tried on a genuinely thin
+genre (never-fail on this soft axis). Every rung this fires is logged, so a starved or
+unexpectedly narrow genre run is diagnosable from the log alone:
+
+```
+stage=genre_seeds | genre=<id> family=F genre(s): <descendant ids>
+stage=genre_pool | genre=<name> threshold=0.35 family=F genres=N tracks=T
+stage=genre_pool | relaxation step threshold=0.350 tracks=T < NEEDED — widening
+stage=genre_pool | relaxation settled threshold=0.200 tracks=T (needed NEEDED)
+```
+
+(or, if every rung was exhausted: `stage=genre_pool | genre=<name> starved: widest threshold=...
+yields N tracks (< NEEDED). Generating from the widest pool.`) — grep `stage=genre_pool` in the
+per-playlist log (`logs/playlists/`) to see exactly which rung a given generation settled on.
+`stage=genre_seeds` (same log) shows the cluster count and the piers realized after the
+min-cluster-size + pier-bridgeability veto, if the seed side (not the bridge pool) is the thing to
+diagnose instead.
+
+**`min_cluster_size` and the composite seed-score weights** (`seed_weight_prominence` /
+`_canonicity` / `_centrality` / `_typicality` / `_investment`) live in the same config block —
+see the spec's §3.2 for what each weight represents; they are a retune, not a rewrite, if the
+piers a genre selects feel wrong (e.g. raise `seed_weight_investment` to bias piers toward artists
+already in your library, or lower `seed_weight_prominence` if generation over-indexes on
+Last.fm-famous artists at the expense of niche ones you actually own).
+
+---
+
 ## The four mode axes and per-cohesion-mode knobs
 
 Cohesion-vs-discovery is exposed as four independent axes (`ARCHITECTURE.md` §"The four mode

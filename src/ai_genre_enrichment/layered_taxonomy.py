@@ -113,6 +113,7 @@ class LayeredTaxonomy:
         })
         object.__setattr__(self, "_edges_by_source", _group_edges(self.edges))
         object.__setattr__(self, "_parent_edges_by_source", _group_parent_edges(self.edges))
+        object.__setattr__(self, "_is_a_children_by_parent", _group_is_a_children(self.edges))
         object.__setattr__(self, "_bridge_rules_by_pair", {
             (rule.source_genre_id, rule.target_genre_id): rule
             for rule in self.bridge_rules
@@ -233,6 +234,35 @@ class LayeredTaxonomy:
             )
             if genre is not None and genre.kind != FAMILY_KIND
         )
+
+    def descendant_genre_ids(self, genre_id: str, *, active_only: bool = True) -> tuple[str, ...]:
+        """``genre_id`` plus every genre that ``is_a``-descends from it, TRANSITIVELY.
+
+        The taxonomy records only the NEAREST parent — `melodic death metal is_a
+        death metal is_a metal` carries no direct metal edge — so a one-hop child
+        query silently misses grandchildren. Any consumer asking "what is in this
+        genre" must walk the chain; that is what this does.
+
+        ``is_a`` only. `family_context` is the weaker "sits near this family" edge
+        (1.6k of them vs ~340 is_a) and is deliberately NOT traversed: it would drag
+        adjacent scenes into a genre's own membership.
+
+        ``genre_id`` itself is always included, whatever its status — the caller
+        asked for it. Descendants default to ACTIVE only, so a genre still under
+        review does not silently enlarge a published genre's membership. Cycle-safe.
+        """
+        seen = {genre_id}
+        stack = [genre_id]
+        while stack:
+            for child in self._is_a_children_by_parent.get(stack.pop(), ()):
+                if child in seen:
+                    continue
+                record = self._genres_by_id.get(child)
+                if active_only and record is not None and record.status != "active":
+                    continue
+                seen.add(child)
+                stack.append(child)
+        return tuple(sorted(seen))
 
     def edge_for_genre(self, source_genre_id: str, target_genre_id: str, edge_type: str | None = None) -> GenreEdge | None:
         for edge in self._edges_by_source.get(source_genre_id, ()):
@@ -620,6 +650,16 @@ def _group_parent_edges(edges: tuple[GenreEdge, ...]) -> dict[str, tuple[GenreEd
     for edge in edges:
         if edge.edge_type in parent_edge_types:
             grouped.setdefault(edge.source_genre_id, []).append(edge)
+    return {key: tuple(value) for key, value in grouped.items()}
+
+
+def _group_is_a_children(edges: tuple[GenreEdge, ...]) -> dict[str, tuple[str, ...]]:
+    """parent genre_id -> its direct ``is_a`` children. The reverse of the edge
+    direction stored in the YAML, which records child -> parent."""
+    grouped: dict[str, list[str]] = {}
+    for edge in edges:
+        if edge.edge_type == "is_a":
+            grouped.setdefault(edge.target_genre_id, []).append(edge.source_genre_id)
     return {key: tuple(value) for key, value in grouped.items()}
 
 
