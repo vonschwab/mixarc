@@ -166,7 +166,45 @@ specific mechanism: the transitive `is_a` family walk admits `dub`, and in *this
 `dub` is 64% non-reggae, because the tag marks a production style as often as a Jamaican
 genre.
 
-### CORRECTED 2026-07-27 (Dylan) — the pier is legitimate; the TAGS are wrong
+### MECHANISM (2026-07-27, measured) — bridgeability is a STAR test; the beam needs a PATH
+
+The pier-bridgeability veto **does** run in genre mode (`playlist_generator.py:2940` passes
+`genre_mode.pool_membership_mask` as the neighbour set). It did not veto the outlier pier, and
+it was right not to by its own definition — which is the defect.
+
+The veto asks: *does this pier have k neighbours above `pier_bridgeability_floor_t` (0.30)?*
+That is a **star** measurement — every neighbour measured to the hub. The beam then has to
+spend ~5 consecutive slots approaching the pier, which needs a **path** through that
+neighbourhood.
+
+| | Augustus Pablo (central pier) | Sonny & The Sunsets (outlier pier) |
+|---|---:|---:|
+| top-10 similarity TO the pier | min 0.886 / mean 0.909 | min **0.653** / mean 0.746 |
+| similarity AMONG those 10 | min **0.769** / mean 0.898 | min **0.295** / mean 0.566 |
+| sonic centrality in the 590-track pool | 0.428 (rank 242) | **0.233 (rank 332)** |
+
+Sonny clears the floor by more than 2×, so the veto passes him. But his neighbourhood is
+internally diffuse — Peaking Lights, Nightmares On Wax and Tortoise are each close to *him*
+and as far as 0.295 from *each other*. Any ordering of that set contains a weak edge, and the
+observed worst edge is 0.232. Augustus Pablo's neighbourhood is a cluster (min 0.769), so his
+approach is smooth.
+
+Sonny is also the **only** pier below the pool's median centrality (0.304); the other four sit
+at 0.402–0.463.
+
+**Direction — UNTESTED.** Make bridgeability path-aware rather than star-shaped: score a pier
+by the worst edge on the best path from the pool core to it, not by direct similarity to k
+neighbours. Cheaper approximation: require the k-neighbourhood's internal minimum (or its
+2-nearest-neighbour chain) to clear a floor too. Not validated — do not build without
+measuring against `min_T = 0.2318`.
+
+**Rejected — measured:** *"Callahan is being picked as a medoid because reggae is a small
+genre."* The opposite. The pool's true medoids are the real dub records (the 8 most central
+are all King Tubby / Augustus Pablo / Roots Radics / Keith Hudson, 0.500–0.509); every tail
+track sits in the **bottom half** — Callahan 0.202 (rank 355/590). They are the periphery, and
+they appear because they are the pier's neighbourhood, not because they are hubs.
+
+### ALSO — the TAGS are wrong (separate, real, smaller)
 
 Dylan: *The Diving Kind* was recorded with a largely African band and **is** reggae plus
 afrobeat/highlife. So the terminal pier is a correct choice and the "contaminated pier"
