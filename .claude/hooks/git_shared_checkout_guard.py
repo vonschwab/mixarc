@@ -16,8 +16,16 @@ DENY (safe alternative always exists):
      --squash/--fixup/--no-edit — those are legitimate conclusion commits)
   - git reset --hard / git clean -f / git checkout . / git restore .
 
-WARN (allowed, but flagged): git switch / git checkout -b|-B — changes the
-shared HEAD for every session; make sure no one else is mid-edit.
+WARN (allowed, but flagged):
+  - git switch / git checkout -b|-B — changes the shared HEAD for every
+    session; make sure no one else is mid-edit.
+  - an otherwise-safe `git commit` while HEAD is off `master` — canonical's
+    resting state is master, so any other branch means a session moved the
+    shared HEAD and this commit is about to stack onto their work. Fires once
+    per branch per session. This is the other half of the branch-switch warning
+    above: that one fires for whoever switches, this one for whoever commits
+    afterwards (2026-07-27, when only the first existed and a commit landed on
+    another session's branch unnoticed).
 
 SATELLITE MODE: a satellite clone's working tree is private (see
 workspace_identity.is_satellite), so the sweeper DENYs above downgrade to a
@@ -44,6 +52,10 @@ from workspace_identity import is_satellite  # noqa: E402
 
 PROJECT_DIR = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
 
+# Set from the hook payload in main(); analyze_segment needs it for the
+# once-per-branch off-master marker, and analyze() is also called directly by tests.
+_SESSION_ID = ""
+
 _SAFE_ADD = "Stage explicit paths instead: `git add <path1> <path2>` (never -A/-u/.)."
 _SAFE_COMMIT = (
     "On a shared checkout a bare/`-a` commit sweeps other sessions' staged work. "
@@ -57,6 +69,31 @@ _SAT_WARN = (
     "-- <paths>` everywhere. One reminder per session."
 )
 
+_MASTER_BRANCH = "master"
+
+
+def _off_master_message(branch):
+    """Warn that this commit is landing somewhere other than canonical's master.
+
+    2026-07-27: one session created a feature branch here (with the user's
+    go-ahead). Creating a branch moves HEAD for EVERY session in the checkout,
+    so a second session's commits silently stacked onto that branch instead of
+    master, and were only noticed after the fact. The existing branch-switch
+    warning fires for whoever switches; nobody warned the session that just
+    committed afterwards. This is that missing half.
+    """
+    where = f"branch `{branch}`" if branch else "a DETACHED HEAD"
+    return (
+        f"Hook note: this canonical checkout is on {where}, not `{_MASTER_BRANCH}` — "
+        "another session very likely moved the shared HEAD, and your commit is about "
+        "to land on their branch. Check `git log --oneline master..HEAD` to see whose "
+        "work is there. If this commit isn't part of that branch's work, coordinate "
+        "before committing (or run this session from a satellite clone: "
+        "`python tools/create_satellite.py --name PG3_SAT3 --port 8773`). "
+        "Once per branch per session."
+    )
+
+
 _BROAD_ADD = {"-A", "--all", "-u", "--update", ".", "*", ":/", "-Au", "-uA", "-uAll"}
 _MERGE_MARKERS = ("MERGE_HEAD", "rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD", "REVERT_HEAD")
 _COMMIT_CONCLUSION_FLAGS = {"--amend", "--squash", "--fixup", "--no-edit"}
@@ -66,6 +103,24 @@ def _merge_or_rebase_in_progress():
     """True if a git operation that legitimately ends in a bare `git commit` is live."""
     gitdir = os.path.join(PROJECT_DIR, ".git")
     return any(os.path.exists(os.path.join(gitdir, m)) for m in _MERGE_MARKERS)
+
+
+def _current_branch():
+    """Branch name from .git/HEAD, or None when detached/unreadable.
+
+    Read directly rather than shelling out to `git`: this runs PreToolUse on
+    every Bash call, same reason workspace_identity parses .git/config by hand.
+    """
+    try:
+        with open(os.path.join(PROJECT_DIR, ".git", "HEAD"), encoding="utf-8") as fh:
+            head = fh.read().strip()
+    except OSError:
+        return None
+    if head.startswith("ref:"):
+        ref = head[4:].strip()
+        prefix = "refs/heads/"
+        return ref[len(prefix):] if ref.startswith(prefix) else ref
+    return None  # detached HEAD (raw sha)
 
 
 def _segments(command):
@@ -167,6 +222,17 @@ def analyze_segment(tokens, satellite=False):
             if satellite:
                 return ("warn", _SAT_WARN)
             return ("deny", f"Bare `git commit` commits the shared index. {_SAFE_COMMIT}")
+        # The commit form is safe -- but WHERE is it landing? Canonical's resting
+        # state is master; any other branch means some session moved the shared
+        # HEAD, and this commit is about to stack onto their work.
+        if not satellite:
+            branch = _current_branch()
+            if branch != _MASTER_BRANCH:
+                # Once per branch per session: enough to be seen before the first
+                # commit lands, quiet enough not to nag through a commit series.
+                if _already_fired(_SESSION_ID, "offmaster_" + (branch or "detached")):
+                    return None
+                return ("warn", _off_master_message(branch))
         return None
 
     if sub == "reset":
@@ -232,6 +298,8 @@ def main():
         if (data.get("tool_name") or "") not in ("Bash", "PowerShell"):
             return
         command = (data.get("tool_input") or {}).get("command") or ""
+        global _SESSION_ID
+        _SESSION_ID = data.get("session_id") or ""
         satellite = is_satellite()
         result = analyze(command, satellite)
         if result is None:

@@ -280,3 +280,63 @@ def test_satellite_safe_forms_still_silent():
 def test_default_analyze_unchanged_strict():
     # No-satellite callers keep canonical strictness (regression guard).
     assert _verdict("git add -A") == "deny"
+
+
+# ------------- committing onto another session's branch (canonical only) -------------
+# 2026-07-27: a session created a feature branch in the shared canonical checkout
+# (with the user's go-ahead). Creating a branch moves HEAD for EVERY session, so a
+# second session's commits silently landed on that branch instead of master --
+# noticed only afterwards, and untangling it cost an afternoon. The existing
+# branch-switch warning fires for the session that switches; nothing warned the
+# session that merely committed later.
+
+def test_safe_commit_warns_when_canonical_is_off_master(monkeypatch):
+    monkeypatch.setattr(hook, "_current_branch", lambda: "fix/someone-elses-work")
+    monkeypatch.setattr(hook, "_already_fired", lambda *a: False)
+    assert _verdict("git commit --only -- src/foo.py -m 'x'") == "warn"
+
+
+def test_safe_commit_silent_on_master(monkeypatch):
+    monkeypatch.setattr(hook, "_current_branch", lambda: "master")
+    assert _verdict("git commit --only -- src/foo.py -m 'x'") is None
+
+
+def test_off_master_commit_warning_names_the_branch(monkeypatch):
+    monkeypatch.setattr(hook, "_current_branch", lambda: "fix/someone-elses-work")
+    monkeypatch.setattr(hook, "_already_fired", lambda *a: False)
+    result = hook.analyze("git commit --only -- src/foo.py -m 'x'")
+    assert result is not None and "fix/someone-elses-work" in result[1]
+
+
+def test_off_master_commit_silent_in_satellite(monkeypatch):
+    """A satellite's whole point is its own branch -- never warn there."""
+    monkeypatch.setattr(hook, "_current_branch", lambda: "feat/whatever")
+    assert hook.analyze("git commit --only -- src/foo.py -m 'x'", satellite=True) is None
+
+
+def test_detached_head_commit_warns(monkeypatch):
+    monkeypatch.setattr(hook, "_current_branch", lambda: None)
+    monkeypatch.setattr(hook, "_already_fired", lambda *a: False)
+    assert _verdict("git commit --only -- src/foo.py -m 'x'") == "warn"
+
+
+def test_off_master_warning_does_not_mask_a_deny(monkeypatch):
+    monkeypatch.setattr(hook, "_current_branch", lambda: "fix/someone-elses-work")
+    monkeypatch.setattr(hook, "_already_fired", lambda *a: False)
+    assert _verdict("git add -A && git commit -m 'x'") == "deny"
+
+
+def test_repeat_commits_on_same_branch_warn_once(monkeypatch):
+    """Per-branch, once. Three commits in a row shouldn't nag three times."""
+    fired = set()
+
+    def _fire(session_id, category):
+        already = category in fired
+        fired.add(category)
+        return already
+
+    monkeypatch.setattr(hook, "_current_branch", lambda: "fix/other")
+    monkeypatch.setattr(hook, "_already_fired", _fire)
+    first = _verdict("git commit --only -- a.py -m 'x'")
+    second = _verdict("git commit --only -- b.py -m 'x'")
+    assert first == "warn" and second is None
