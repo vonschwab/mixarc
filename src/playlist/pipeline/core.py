@@ -365,6 +365,10 @@ def generate_playlist_ds(
     internal_connector_ids: Optional[List[str]] = None,
     internal_connector_max_per_segment: int = 0,
     internal_connector_priority: bool = True,
+    # Tag-steering ANCHOR piers (spec 2026-07-27): bundle track_ids of the on-tag
+    # anchors the artist block injected into the pier list, so the builder can
+    # place them in gaps instead of re-ordering them as co-equal piers.
+    tag_anchor_track_ids: Optional[set[str]] = None,
     # Optional pier-bridge infeasible handling + audit context (CLI/GUI)
     dry_run: bool = False,
     pool_source: Optional[str] = None,
@@ -738,6 +742,21 @@ def generate_playlist_ds(
         _seg_guar_pa = int(pb_overrides.get("tag_steering_segment_guarantee_per_artist", 2))
     except (TypeError, ValueError):
         _seg_guar_pa = 2
+    # Anchor gap insertion (spec 2026-07-27). Live default ON per principle #22;
+    # false = legacy append + global re-order. Inert unless tag_anchor_track_ids
+    # is non-empty, i.e. never on for a non-steered or genre-mode run.
+    try:
+        _anchor_gap_insertion = bool(
+            pb_overrides.get("tag_steering_anchor_gap_insertion", True)
+        )
+    except (TypeError, ValueError):
+        _anchor_gap_insertion = True
+    try:
+        _anchor_min_bridge = float(
+            pb_overrides.get("tag_steering_anchor_min_bridge", 0.35)
+        )
+    except (TypeError, ValueError):
+        _anchor_min_bridge = 0.35
     if _tag_steering_tags:
         _xsonic = embedding.X_sonic_for_embed
         if _xsonic is not None:
@@ -1162,6 +1181,9 @@ def generate_playlist_ds(
                     on_tag_guarantee_ids=_on_tag_guarantee_ids,
                     on_tag_segment_guarantee_max=_seg_guar_max,
                     on_tag_segment_guarantee_per_artist=_seg_guar_pa,
+                    tag_anchor_track_ids=tag_anchor_track_ids,
+                    tag_anchor_gap_insertion=_anchor_gap_insertion,
+                    tag_anchor_min_bridge=_anchor_min_bridge,
                     # Phase 1 Task 5 req 0: thread the raw genre_mode string
                     # through so the corridor path's genre-mode-keyed
                     # relevance mask (Phase 1 Task 4) gets the real slider

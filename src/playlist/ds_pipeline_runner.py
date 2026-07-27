@@ -108,6 +108,7 @@ def generate_playlist_ds(
     internal_connector_ids: Optional[list[str]] = None,
     internal_connector_max_per_segment: int = 0,
     internal_connector_priority: bool = True,
+    tag_anchor_track_ids: Optional[set[str]] = None,
 ) -> DsRunResult:
     """Production-facing wrapper around the DS pipeline.
 
@@ -138,6 +139,7 @@ def generate_playlist_ds(
             internal_connector_ids=internal_connector_ids,
             internal_connector_max_per_segment=internal_connector_max_per_segment,
             internal_connector_priority=internal_connector_priority,
+            tag_anchor_track_ids=tag_anchor_track_ids,
         )
 
     logger.info(
@@ -175,6 +177,7 @@ def generate_playlist_ds(
         internal_connector_ids=internal_connector_ids,
         internal_connector_max_per_segment=internal_connector_max_per_segment,
         internal_connector_priority=internal_connector_priority,
+        tag_anchor_track_ids=tag_anchor_track_ids,
     )
 
     playlist_stats = result.stats.get("playlist", {})

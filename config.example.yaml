@@ -399,6 +399,13 @@ playlists:
       tag_steering_anchor_max: 3          # on-tag tracks injected as piers (0 = Phase-A-only / off)
       tag_steering_anchor_min_bridge: 0.35  # min sonic cosine to a seed pier for an anchor to qualify (no islands)
       tag_steering_anchor_per_artist: 1   # per-artist cap within the anchor set
+      # Anchor PLACEMENT (spec 2026-07-27): order the artist piers first, then insert
+      # anchors into the interior gaps (at most one per gap). Makes two rules
+      # structural instead of hoped-for: an anchor is never terminal, and no two
+      # anchors are adjacent. false = legacy append + global re-order (the path that
+      # ended a Sonic Youth playlist on Built To Spill). Feasibility is K <= P-1 for
+      # P artist piers; excess anchors are dropped by selection rank and LOGGED.
+      tag_steering_anchor_gap_insertion: true
       tag_steering_prototype_min_support: 25  # min library tracks/tag to trust the sonic prototype (else genre-dense only)
       tag_steering_prototype_min_cohesion: 0.15  # min intra-set cohesion; below this the tag is sonically multimodal -> genre-dense only
       # Total-generation wall-clock budget (seconds). A single shared deadline is

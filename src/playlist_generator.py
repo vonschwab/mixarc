@@ -600,6 +600,7 @@ class PlaylistGenerator:
         dry_run: bool = False,
         audit_context_extra: Optional[Dict[str, Any]] = None,
         pace_mode: Optional[str] = None,
+        tag_anchor_track_ids: Optional[Set[str]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Run DS pipeline and return ordered track dicts; raise on failure.
@@ -935,6 +936,7 @@ class PlaylistGenerator:
             internal_connector_ids=internal_connector_ids,
             internal_connector_max_per_segment=internal_connector_max_per_segment,
             internal_connector_priority=internal_connector_priority,
+            tag_anchor_track_ids=tag_anchor_track_ids,
         )
 
         tracks: List[Dict[str, Any]] = []
@@ -2206,6 +2208,7 @@ class PlaylistGenerator:
                 # piers so a sonically-peripheral clique is GUARANTEED to appear (bridges alone
                 # can't place them — see the bridge-side Phase A result). Selection is bridgeable
                 # + tag-central + diverse; gated on steering; capped so interiors aren't starved.
+                _tag_anchor_ids: Optional[Set[str]] = None
                 _anchor_max = int((ds_cfg.get("pier_bridge", {}) or {}).get("tag_steering_anchor_max", 3))
                 if steering_target is not None and _on_tag_track_ids and _anchor_max > 0:
                     from src.playlist.tag_steering import select_on_tag_anchors
@@ -2232,6 +2235,14 @@ class PlaylistGenerator:
                             len(_anchors), len({str(bundle.track_artists[a]) for a in _anchors}),
                             [str(bundle.track_ids[a]) for a in _anchors],
                         )
+                        # Hand the anchors' identity to the builder so it places them
+                        # in gaps rather than re-ordering them as co-equal piers.
+                        # Read back from ordered_medoids, NOT from _anchors: the
+                        # `[:_cap]` truncation above can drop the tail.
+                        _capped = set(int(m) for m in ordered_medoids)
+                        _tag_anchor_ids = {
+                            str(bundle.track_ids[a]) for a in _anchors if int(a) in _capped
+                        }
                     else:
                         logger.info(
                             "Tag steering on-tag anchors: 0 bridgeable on-tag tracks (min_bridge=%.2f) — "
@@ -2470,6 +2481,7 @@ class PlaylistGenerator:
                     pool_source=pool_source,
                     dry_run=bool(dry_run),
                     audit_context_extra={"style_summary": style_summary},
+                    tag_anchor_track_ids=_tag_anchor_ids,
                 )
             except ValueError as e:
                 error_msg = str(e)
@@ -2510,6 +2522,7 @@ class PlaylistGenerator:
                             pool_source=pool_source,
                             dry_run=bool(dry_run),
                             audit_context_extra={"style_summary": style_summary},
+                            tag_anchor_track_ids=_tag_anchor_ids,
                         )
                         fallback_used = True
                         logger.warning(
