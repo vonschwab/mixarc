@@ -933,7 +933,24 @@ def generate_playlist_ds(
         if True:
             # Deduplicate candidate pool by (artist, title), keeping canonical version.
             pool_indices = list(getattr(pool, "eligible_indices", pool.pool_indices))
-            pool_indices = dedupe_pool_by_track_key(bundle, pool_indices)
+            # Album names are not in the artifact bundle, but version preference needs
+            # them to catch live/bootleg releases with clean track titles. ONE batched
+            # query for the whole pool -- never per-track (Layer 4 principle 24).
+            # Reuses `_meta_db`, already resolved above for popularity's own
+            # album-aware version-preference lookup (same overrides source).
+            try:
+                from src.playlist.artist_style import _load_albums_for_indices
+                _pool_albums = _load_albums_for_indices(bundle, pool_indices, _meta_db)
+            except Exception:
+                _pool_albums = {}
+            if not _pool_albums:
+                logger.warning(
+                    "Pool dedupe: album lookup returned nothing - version preference is "
+                    "title-only for this run (live albums with clean titles will not be caught)."
+                )
+            pool_indices = dedupe_pool_by_track_key(
+                bundle, pool_indices, albums_by_index=_pool_albums
+            )
 
             audit.ensure_context(
                 bundle=bundle,
@@ -1153,6 +1170,7 @@ def generate_playlist_ds(
                     energy_matrix=energy_matrix,
                     voice_prob=voice_prob,
                     popularity_values=popularity_values,
+                    albums_by_index=_pool_albums,
                     min_gap=int(getattr(cfg.construct, "min_gap", 1) or 1),
                     deadline=_generation_deadline,
                     sonic_tag_affinity=_beam_tag_affinity,
@@ -1214,7 +1232,9 @@ def generate_playlist_ds(
                     )
                     retry_pool.stats["target_length"] = num_tracks
                     retry_pool_indices = list(getattr(retry_pool, "eligible_indices", retry_pool.pool_indices))
-                    retry_pool_indices = dedupe_pool_by_track_key(bundle, retry_pool_indices)
+                    retry_pool_indices = dedupe_pool_by_track_key(
+                        bundle, retry_pool_indices, albums_by_index=_pool_albums
+                    )
                     retry_result = _run_pier_bridge(retry_pool_indices)
                     summary["candidate_pool_indices_after_dedupe"] = int(len(retry_pool_indices))
                     summary["candidate_pool_stats"] = dict(retry_pool.stats or {})

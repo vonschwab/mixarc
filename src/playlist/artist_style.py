@@ -366,7 +366,10 @@ def _load_albums_for_indices(bundle, indices: List[int], db_path: str) -> Dict[i
 
     The artifact bundle does not carry album names, but version-preference needs
     them to catch album-based live recordings (clean track title, live album).
-    Best-effort: returns {} on any error. Reads metadata.db read-only."""
+    Best-effort: returns {} on any error. Reads metadata.db read-only.
+
+    Also used for candidate-pool dedupe (~7k indices); SQLite's variable limit is
+    32766, so a single batched query is safe at pool scale."""
     import sqlite3
 
     track_ids = getattr(bundle, "track_ids", None)

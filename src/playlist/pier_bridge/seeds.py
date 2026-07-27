@@ -173,6 +173,7 @@ def _order_seeds_by_bridgeability(
 def _dedupe_candidate_pool(
     pool_indices: List[int],
     bundle: ArtifactBundle,
+    albums_by_index: Optional[Dict[int, str]] = None,
 ) -> Tuple[List[int], Dict[str, int]]:
     """
     Deduplicate candidate pool by normalized artist+title.
@@ -190,7 +191,8 @@ def _dedupe_candidate_pool(
 
         # Compute preference score (higher = more canonical)
         title = str(bundle.track_titles[idx]) if bundle.track_titles is not None else ""
-        pref_score = calculate_version_preference_score(title)
+        album = (albums_by_index or {}).get(int(idx), "")
+        pref_score = calculate_version_preference_score(title, album)
 
         if key not in seen or pref_score > seen[key][1]:
             seen[key] = (idx, pref_score)

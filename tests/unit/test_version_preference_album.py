@@ -83,3 +83,20 @@ def test_dedupe_does_not_log_when_scores_differ(caplog):
         kept = _dedupe_artist_indices([0, 1], titles, durations, albums)
     assert kept == [1]  # Task 1 detection makes the studio cut win outright
     assert not any("possible undetected live take" in r.message for r in caplog.records)
+
+
+def test_pool_dedupe_is_album_aware():
+    from src.playlist.pipeline.pier_resolver import dedupe_pool_by_track_key
+
+    class _Bundle:
+        track_titles = ["Kool Thing", "Kool Thing"]
+        track_artists = ["Sonic Youth", "Sonic Youth"]
+        artist_keys = ["sonic youth", "sonic youth"]
+        track_ids = ["live_id", "studio_id"]
+
+    bundle = _Bundle()
+    # Title-only (today): both score 100, so the first index survives - the live one.
+    assert dedupe_pool_by_track_key(bundle, [0, 1]) == [0]
+    # Album-aware: the live album is detected, so the studio version survives.
+    albums = {0: "Live In Dallas 2006", 1: "Goo [24bit]"}
+    assert dedupe_pool_by_track_key(bundle, [0, 1], albums_by_index=albums) == [1]
