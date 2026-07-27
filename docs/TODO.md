@@ -42,3 +42,57 @@ pool construction, not the taxonomy walk. Do not "fix" this by touching family s
 reggae generation at INFO and read the gate tally + per-segment `pool_after_gate` lines.
 "0.232" alone cannot distinguish a true in-genre scarcity from a starved final segment where
 the beam never had candidates to rank. Confirm which before designing.
+
+---
+
+### DIAGNOSED 2026-07-27 — it is CONTAMINATION, not scarcity. The stated lever is wrong.
+
+Ran it (`logs/playlists/2026-07-27_141058_reggae_000001.log`), reproduced `min_T=0.2318`,
+and read the log. The observation above is exactly right — positions 1–24 are genuine
+roots/dub, 25–30 drift out. The *cause* is not pool breadth.
+
+**All three weakest edges are one contiguous run of non-reggae tracks:**
+
+```
+T=0.232  Gigi – Kahn              -> Bill Callahan – Ride My Dub
+T=0.349  Strange Garden           -> Tortoise – The Equator
+T=0.533  Bill Callahan            -> Strange Garden – An Islamic Boat Song
+```
+
+Every one of them entered the pool through the `dub` tag:
+`Tortoise = dub + jazz_fusion + krautrock + post_rock`,
+`Peaking Lights = dub + chillwave + dream_pop`, `Gigi = dub + dance + trance`.
+
+**The numbers that settle it:**
+
+| Measure | Value |
+|---|---:|
+| Albums tagged `dub` | 76 |
+| ...also carrying a core reggae genre | 27 |
+| ...**`dub` with NO reggae genre** | **49** |
+| `dub` share of the 590-track reggae pool | 497 |
+| Tracks with a core reggae genre (no `dub`) | **378 across 40 artists** |
+| Distinct artists the 30-track playlist used | 22 |
+
+378 tracks across 40 artists is ample for 30 slots at `min_gap=6`, `max_artist=4`. Roughly
+23 in-genre artists went **unused** while the beam reached for Tortoise. The tail is not
+empty — it is full of the wrong tracks.
+
+**So do NOT widen the pool.** Adding more `dub`-tagged tracks makes this worse. This is the
+same shape as `project_pool_starvation_research`'s "manufactured, not scarcity", with a
+specific mechanism: the transitive `is_a` family walk admits `dub`, and in *this library*
+`dub` is 64% non-reggae, because the tag marks a production style as often as a Jamaican
+genre.
+
+**Design directions (not yet chosen — needs a decision):**
+
+1. **Corroboration rule for family members.** A track admitted only via an umbrella family
+   genre joins the pool only if its album (or artist) also carries a core genre. Cheapest,
+   and targets the mechanism directly.
+2. **Rank core above family.** Keep family members admissible but sort them below core-genre
+   members, so the tail exhausts real reggae first. Softer; may still drift when core runs out.
+3. **Split `dub` in the taxonomy** (Jamaican dub vs dub-as-production-style). Correct at the
+   root and fixes every consumer, but it is taxonomy surgery and needs the growth loop.
+
+Prefer (1) or (2); (3) is the honest long-term fix. Whichever is chosen, re-run this exact
+generation and compare `min_T` — the log above is the baseline.
