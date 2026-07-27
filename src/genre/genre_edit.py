@@ -112,8 +112,21 @@ def apply_user_genre_edit(
     all_rows = resolved_genres_for_album(meta_conn, album_id)
     full_ids = {r.genre_id for r in all_rows}
     non_user_ids = {r.genre_id for r in all_rows if r.source != "user"}
+    # Genres the user previously asserted. These must be re-asserted whenever
+    # they survive in the target: a prior user observed_leaf row whose genre the
+    # graph ALSO carries as an inferred row was suppressed by the plain
+    # `target_ids - non_user_ids` rule, so the rewrite dropped the leaf and the
+    # genre survived only as inferred — which the artifact excludes from
+    # X_genre_raw, silently removing it from generation.
+    #
+    # Scoped deliberately to prior user rows. The edit dialog seeds its chips
+    # from every published layer, so the target routinely contains inferred hub
+    # families (pop, r&b/soul); promoting those to observed_leaf would bake hub
+    # genres into the artifact at full weight — the 2026-06-12 saturation
+    # incident. An inferred genre nobody asserted stays inferred.
+    prior_user_ids = {r.genre_id for r in all_rows if r.source == "user"}
 
-    add_ids = target_ids - non_user_ids
+    add_ids = (target_ids - non_user_ids) | (prior_user_ids & target_ids)
     remove_ids = non_user_ids - target_ids
     resolved_names = sorted(name_of(gid) for gid in target_ids)
 
