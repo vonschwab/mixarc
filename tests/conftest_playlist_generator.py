@@ -69,7 +69,6 @@ def make_synthetic_generator() -> PlaylistGenerator:
     # --- DS-related flags ---
     gen._logged_ds_artifact_warning = True   # suppress missing-artifact warning
     gen._last_ds_report = None
-    gen._pb_backoff_enabled = False
     gen._audit_run_enabled = False
     gen._audit_run_dir = None
 

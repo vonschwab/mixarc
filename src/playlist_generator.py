@@ -322,9 +322,8 @@ class PlaylistGenerator:
         self._last_ds_report: Optional[Dict[str, Any]] = None
         self.genre_similarity_cache = {}  # Legacy cache placeholder
         self._warn_if_ds_artifact_missing()
-        # Runtime flags (CLI/GUI) for optional pier-bridge backoff + run audits.
-        # Default OFF; config.yaml keys can still enable these without flags.
-        self._pb_backoff_enabled: bool = False
+        # Runtime flags (CLI/GUI) for optional run audits. Default OFF;
+        # config.yaml keys can still enable these without flags.
         self._audit_run_enabled: bool = False
         self._audit_run_dir: Optional[str] = None
 
@@ -623,12 +622,6 @@ class PlaylistGenerator:
         pb_overrides = overrides.get("pier_bridge")
         if not isinstance(pb_overrides, dict):
             pb_overrides = {}
-        if getattr(self, "_pb_backoff_enabled", False):
-            ih = pb_overrides.get("infeasible_handling")
-            if not isinstance(ih, dict):
-                ih = {}
-            ih["enabled"] = True
-            pb_overrides["infeasible_handling"] = ih
         if getattr(self, "_audit_run_enabled", False):
             ar = pb_overrides.get("audit_run")
             if not isinstance(ar, dict):

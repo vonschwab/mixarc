@@ -204,7 +204,7 @@ Choices: `balanced` (default) | `tight` | `exploratory` | `sonic_only` | `genre_
 | `--artist-only` | Restrict the pool to the requested artist — no discovery. |
 | `--verbose` | DEBUG logging incl. transition metrics + constraint enforcement — **the first thing to reach for when a generation looks wrong; see the `playlist-testing` skill.** |
 | `--audit-run` / `--audit-run-dir DIR` | Write a per-run pier-bridge markdown audit (default `docs/run_audits`). |
-| `--pb-backoff`, `--pb-experiment-*` | Experimental/diagnostic pier-bridge scoring knobs — not for normal use. |
+| `--pb-experiment-*` | Experimental/diagnostic pier-bridge scoring knobs — not for normal use. |
 
 There is no `--sonic-variant` flag — sonic-space selection is a `config.yaml`
 (`artifacts.sonic_variant_override`) concern now that MuQ is the sole learned embedding; the CLI

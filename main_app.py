@@ -621,11 +621,10 @@ def main():
         type=str,
         help="Override run audit output directory (default: docs/run_audits).",
     )
-    parser.add_argument(
-        "--pb-backoff",
-        action="store_true",
-        help="Enable optional pier-bridge infeasible backoff for this run (see playlists.ds_pipeline.pier_bridge.infeasible_handling).",
-    )
+    # --pb-backoff removed 2026-07: it set infeasible_handling.enabled, one of
+    # the keys retired with the legacy per-segment relaxation ladder (corridor
+    # Phase 1 Task 8). The corridor widening ladder (corridor_widen_*) is the
+    # sole segment-level recovery mechanism and has no runtime flag.
     parser.add_argument(
         "--pb-experiment-bridge-scoring",
         action="store_true",
@@ -753,8 +752,6 @@ def main():
             app.generator._audit_run_enabled = True
         if getattr(args, "audit_run_dir", None):
             app.generator._audit_run_dir = str(getattr(args, "audit_run_dir"))
-        if getattr(args, "pb_backoff", False):
-            app.generator._pb_backoff_enabled = True
         dynamic_flag = getattr(args, "cohesion_mode", None) == "dynamic"
         if args.dry_run:
             section("DRY RUN MODE")
