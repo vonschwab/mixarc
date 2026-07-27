@@ -24,8 +24,11 @@ def _meta_db(tmp_path):
         "CREATE TABLE track_genres (track_id TEXT, genre TEXT);"
         "CREATE TABLE album_genres (album_id TEXT, genre TEXT);"
         "CREATE TABLE artist_genres (artist TEXT, genre TEXT);"
+        # `release_id` mirrors production (and tests/unit/test_genre_edit.py):
+        # graph membership is decided by RELEASE KEY, not by a stamped album_id,
+        # so a release fragment that shares the key still resolves to graph.
         "CREATE TABLE genre_graph_release_genre_assignments "
-        "(album_id TEXT, genre_id TEXT, assignment_layer TEXT, confidence REAL);"
+        "(release_id TEXT, album_id TEXT, genre_id TEXT, assignment_layer TEXT, confidence REAL);"
         "CREATE TABLE genre_graph_canonical_genres (genre_id TEXT PRIMARY KEY, name TEXT, "
         " kind TEXT, specificity_score REAL, status TEXT, taxonomy_version TEXT);"
         "CREATE TABLE release_effective_genres (album_id TEXT NOT NULL, release_key TEXT, "

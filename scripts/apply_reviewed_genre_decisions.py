@@ -45,6 +45,20 @@ from src.genre.authority import display_genre_names_for_album  # noqa: E402
 from src.genre.genre_edit import apply_user_genre_edit  # noqa: E402
 
 
+def asserted_leaf_names(conn: sqlite3.Connection, album_id: str) -> set[str]:
+    """Display names this album carries as a user-asserted observed_leaf row."""
+    return {
+        name
+        for (name,) in conn.execute(
+            "SELECT COALESCE(g.name, reg.genre_id) FROM release_effective_genres reg "
+            "LEFT JOIN genre_graph_canonical_genres g ON g.genre_id = reg.genre_id "
+            "WHERE reg.album_id = ? AND reg.source = 'user' "
+            "AND reg.assignment_layer = 'observed_leaf'",
+            (album_id,),
+        )
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     parser.add_argument("--decisions", required=True)
@@ -66,7 +80,15 @@ def main(argv: list[str] | None = None) -> int:
             target = set(entry["target_names"])
             entry["_add"] = sorted(target - current)
             entry["_remove"] = sorted(current - target)
-            if not entry["_add"] and not entry["_remove"]:
+            # A force_assert entry can be a no-op by NAME while still needing a
+            # write: the genre is present, just at an inferred layer. Only the
+            # layer check can tell, so consult it before calling this a no-op.
+            forced_pending = [
+                g for g in (entry.get("force_assert") or [])
+                if g not in asserted_leaf_names(conn, entry["album_id"])
+            ]
+            entry["_forced"] = forced_pending
+            if not entry["_add"] and not entry["_remove"] and not forced_pending:
                 noop.append(entry)
             elif not graph_key_is_live(conn, entry["artist"], entry["title"]):
                 blocked.append(entry)
@@ -80,6 +102,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"      + {add}")
             if entry["_remove"]:
                 print(f"      - {rem}")
+            if entry["_forced"]:
+                print(f"      ! assert (currently inferred only): {', '.join(entry['_forced'])}")
 
         if noop:
             print(f"\n  NO-OP ({len(noop)}) — already matches the target:")
@@ -104,6 +128,7 @@ def main(argv: list[str] | None = None) -> int:
                 conn, store, taxonomy,
                 artist=entry["artist"], album=entry["title"],
                 target_names=entry["target_names"],
+                force_assert=entry.get("force_assert"),
             )
             after = set(display_genre_names_for_album(conn, entry["album_id"]))
             target = set(entry["target_names"])

@@ -232,6 +232,159 @@ def test_apply_edit_does_not_promote_an_unasserted_inferred_genre(tmp_path):
     assert (pop_id, "observed_leaf", "user") not in rows, "hub family promoted to a leaf"
 
 
+def _album_with_inferred_only_genre(tmp_path):
+    """ORPH1 carrying `house` as a graph leaf and `post-rock` only as inferred."""
+    from src.genre import genre_publish
+    from src.ai_genre_enrichment.layered_taxonomy import load_default_layered_taxonomy
+
+    meta = _edit_dbs(tmp_path)
+    taxonomy = load_default_layered_taxonomy()
+    house_id = genre_publish._term_to_genre_id(taxonomy, "house")
+    post_id = genre_publish._term_to_genre_id(taxonomy, "post-rock")
+    assert house_id and post_id and house_id != post_id
+    meta.execute(
+        "INSERT INTO genre_graph_release_genre_assignments "
+        "VALUES ('the radio dept::pet grief','ORPH1',?,'observed_leaf',0.9)", (house_id,))
+    meta.execute(
+        "INSERT INTO genre_graph_release_genre_assignments "
+        "VALUES ('the radio dept::pet grief','ORPH1',?,'inferred_parent',0.5)", (post_id,))
+    meta.execute("INSERT INTO release_effective_genres "
+                 "VALUES ('ORPH1','k',?, 'observed_leaf',0.9,'graph')", (house_id,))
+    meta.execute("INSERT INTO release_effective_genres "
+                 "VALUES ('ORPH1','k',?, 'inferred_parent',0.5,'graph')", (post_id,))
+    # Populate the canonical id->name map so the override records display names
+    # ("post-rock") as production does, not the raw id it falls back to.
+    for gid, name in ((house_id, "house"), (post_id, "post-rock")):
+        meta.execute(
+            "INSERT INTO genre_graph_canonical_genres "
+            "VALUES (?,?, 'genre', 0.5, 'active', 'test')", (gid, name))
+    meta.commit()
+    return meta, taxonomy, post_id
+
+
+def test_force_assert_promotes_an_inferred_only_genre(tmp_path):
+    """A sibling edition asserts it, so this album should too — not merely infer it.
+
+    Sibling-edition repair (2026-07-27) hit this: Suicide's 2019 remaster was
+    meant to inherit minimal synth / new wave / post-punk from its sibling, but
+    those existed there only as inferred rows and the edit path leaves those
+    alone by design. force_assert is the narrow, evidence-backed escape hatch:
+    the genre is an observed_leaf on another edition of the same release.
+    """
+    from src.genre import genre_edit
+    from src.ai_genre_enrichment.storage import SidecarStore
+
+    meta, taxonomy, post_id = _album_with_inferred_only_genre(tmp_path)
+    store = SidecarStore(str(tmp_path / "s.db"))
+    store.initialize()
+
+    genre_edit.apply_user_genre_edit(
+        meta, store, taxonomy, artist="The  Radio Dept.", album="Pet Grief",
+        target_names=["house", "post-rock"], force_assert=["post-rock"])
+
+    rows = {(r[0], r[1], r[2]) for r in meta.execute(
+        "SELECT genre_id, assignment_layer, source FROM release_effective_genres "
+        "WHERE album_id='ORPH1'")}
+    assert (post_id, "observed_leaf", "user") in rows
+
+
+def test_without_force_assert_the_same_genre_stays_inferred(tmp_path):
+    """The default must keep protecting against hub-family promotion."""
+    from src.genre import genre_edit
+    from src.ai_genre_enrichment.storage import SidecarStore
+
+    meta, taxonomy, post_id = _album_with_inferred_only_genre(tmp_path)
+    store = SidecarStore(str(tmp_path / "s.db"))
+    store.initialize()
+
+    genre_edit.apply_user_genre_edit(
+        meta, store, taxonomy, artist="The  Radio Dept.", album="Pet Grief",
+        target_names=["house", "post-rock"])
+
+    rows = {(r[0], r[1], r[2]) for r in meta.execute(
+        "SELECT genre_id, assignment_layer, source FROM release_effective_genres "
+        "WHERE album_id='ORPH1'")}
+    assert (post_id, "observed_leaf", "user") not in rows
+
+
+def test_force_assert_is_recorded_in_the_durable_override(tmp_path):
+    """Otherwise a later full publish would silently revert the assertion."""
+    from src.genre import genre_edit
+    from src.ai_genre_enrichment.storage import SidecarStore
+
+    meta, taxonomy, _post_id = _album_with_inferred_only_genre(tmp_path)
+    store = SidecarStore(str(tmp_path / "s.db"))
+    store.initialize()
+
+    genre_edit.apply_user_genre_edit(
+        meta, store, taxonomy, artist="The  Radio Dept.", album="Pet Grief",
+        target_names=["house", "post-rock"], force_assert=["post-rock"])
+
+    override = store.get_user_override("the radio dept::pet grief")
+    assert override is not None and "post-rock" in override["genres_add"]
+
+
+def test_force_assert_outside_the_target_is_a_caller_error(tmp_path):
+    """A knob that cannot act is a bug, not a silent no-op (CLAUDE.md)."""
+    import pytest
+    from src.genre import genre_edit
+    from src.ai_genre_enrichment.storage import SidecarStore
+
+    meta, taxonomy, _post_id = _album_with_inferred_only_genre(tmp_path)
+    store = SidecarStore(str(tmp_path / "s.db"))
+    store.initialize()
+
+    with pytest.raises(ValueError, match="force_assert"):
+        genre_edit.apply_user_genre_edit(
+            meta, store, taxonomy, artist="The  Radio Dept.", album="Pet Grief",
+            target_names=["house"], force_assert=["post-rock"])
+
+
+def test_edit_keeps_graph_genres_when_album_id_is_unstamped(tmp_path):
+    """An album sharing a release_key with a stamped sibling must stay on graph.
+
+    `materialize_album_genres` reads graph rows by RELEASE_KEY precisely so every
+    fragment of a release (feat./collab variants, duplicate imports) resolves to
+    graph. But the edit path gated on `album_id` being stamped in
+    `genre_graph_release_genre_assignments`, which those fragments are not — so
+    an edit dropped them to the LEGACY path and destroyed their graph genres.
+    Publish gets this right (`build_resolved_table` derives graph_album_ids from
+    release_key membership); the edit path disagreed with it.
+
+    Found 2026-07-27 on a DB copy: editing 'Are You Experienced' (unstamped twin
+    of 'Are You Experienced?') removed 14 rows including acid_rock, blues_rock,
+    hard_rock and psychedelic_rock. 31 albums were in this state.
+    """
+    from src.genre import genre_edit, genre_publish
+    from src.ai_genre_enrichment.layered_taxonomy import load_default_layered_taxonomy
+    from src.ai_genre_enrichment.storage import SidecarStore
+
+    meta = _edit_dbs(tmp_path)
+    store = SidecarStore(str(tmp_path / "s.db"))
+    store.initialize()
+    taxonomy = load_default_layered_taxonomy()
+    shoe_id = genre_publish._term_to_genre_id(taxonomy, "shoegaze")
+    assert shoe_id
+
+    # Graph assignment carries the release_key but is stamped to a DIFFERENT
+    # album_id (the sibling fragment) -- ORPH1 shares only the key.
+    meta.execute(
+        "INSERT INTO genre_graph_release_genre_assignments "
+        "VALUES ('the radio dept::pet grief','SIBLING',?,'observed_leaf',0.9)", (shoe_id,))
+    meta.execute("INSERT INTO release_effective_genres "
+                 "VALUES ('ORPH1','the radio dept::pet grief',?, 'observed_leaf',0.9,'graph')",
+                 (shoe_id,))
+    meta.commit()
+
+    genre_edit.apply_user_genre_edit(
+        meta, store, taxonomy, artist="The  Radio Dept.", album="Pet Grief",
+        target_names=["shoegaze", "dream pop"])
+
+    rows = {(r[0], r[1]) for r in meta.execute(
+        "SELECT genre_id, source FROM release_effective_genres WHERE album_id='ORPH1'")}
+    assert (shoe_id, "graph") in rows, "graph genre lost -- album fell to the legacy path"
+
+
 def test_apply_edit_removes_graph_genre(tmp_path):
     """Removing a graph-sourced genre drops it from the authority and records a
     remove override (diffed against the non-user base, so publish reproduces it)."""
