@@ -9,6 +9,41 @@ recurring interrupt cause.
 
 ---
 
+## Artist aliases retroactively change storage keys — decouple them
+
+**Opened:** 2026-07-27 · **Status:** open, scoped, not started · **Area:** identity / genre authority
+
+`make_release_key` → `normalize_release_artist` → `normalize_primary_artist_key`, and that
+last one applies `resolve_alias`. So **adding a line to `data/artist_aliases.yaml` changes the
+storage key of every release by that artist**, retroactively orphaning rows written under the
+old key. See memory `project_artist_alias_graph_key_coupling` for the damage that causes: the
+next genre edit rebuilds the album from a key that finds nothing and deletes its genres.
+
+**Cost of adding one alias today** (measured for Jimi Hendrix, 2026-07-27):
+
+- 15 sidecar tables are keyed by `release_id` or `release_key`.
+- Hendrix alone has **15 distinct release_ids across three spellings**, and at least three
+  releases (`live in maui`, `axis bold as love …`, `live at berkeley 2nd show`) already exist
+  under **two** keys — so a re-key is a MERGE with conflict resolution, not a rename.
+- Then a publish, then verification.
+
+That is the price of every future alias, for a modest benefit each time.
+
+**Better investment — make storage identity alias-independent.** `identity_keys` already has
+`_primary_artist_key_raw` (the pre-alias key; it exists to stop `build_artist_link_map`
+recursing). Point `make_release_key` at that, and aliases go back to doing what they are for:
+playlist-runtime identity — artist diversity, min-gap, seed matching — without touching stored
+keys. One migration instead of one per alias.
+
+Not free: ~90 albums already have a stored `release_key` that disagrees with the derived one,
+so the change needs a re-key pass of its own. Worth specing before the next alias is added.
+
+**Blocked on this:** the Jimi Hendrix alias (`Jimi Hendrix` / `Jimi Hendrix Experience` /
+`The Jimi Hendrix Experience` are one act here, and their editions' genre evidence is split
+across all three today).
+
+---
+
 ## Reggae tail starvation — worst edge 0.232 (pool-breadth lever)
 
 **Opened:** 2026-07-26 · **Status:** open, known regression, deliberately shipped · **Area:** genre mode / candidate pool
