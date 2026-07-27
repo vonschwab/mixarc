@@ -196,7 +196,7 @@ def apply_user_genre_edit(
     genre_publish.materialize_album_genres(
         meta_conn, album_id,
         graph_album_ids=_album_in_graph(meta_conn, album_id, release_key),
-        legacy=genre_publish.legacy_genres_by_album(meta_conn, album_id),
+        legacy=genre_publish.legacy_genres_by_album(meta_conn, album_id, taxonomy=taxonomy),
         overrides=overrides,
         album_to_key={album_id: release_key},
     )

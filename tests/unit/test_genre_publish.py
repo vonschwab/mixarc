@@ -194,6 +194,46 @@ def test_legacy_genres_by_album_aggregates_sources(tmp_path):
     assert "rock" in genres
 
 
+def test_legacy_genres_are_canonicalized_when_a_taxonomy_is_given(tmp_path):
+    """Legacy tokens must land as canonical genre_ids, not raw text.
+
+    The legacy layer wrote its normalized token straight through as the
+    genre_id, so `release_effective_genres` carried ids like `post-rock` (hyphen)
+    while the canonical id is `post_rock`, and the artifact vocabulary picked up
+    the raw string as its own dimension. 46 rows across 25 albums were in this
+    state on 2026-07-27, including junk like `special purpose artist` that the
+    taxonomy rejects outright.
+    """
+    meta = _make_metadata(tmp_path)
+    conn = sqlite3.connect(meta)
+    conn.row_factory = sqlite3.Row
+    conn.execute("INSERT INTO albums VALUES ('ALB1', 'A', 'X')")
+    conn.execute("INSERT INTO album_genres VALUES ('ALB1', 'Post-Rock', 'discogs_release')")
+    conn.commit()
+    taxonomy = load_default_layered_taxonomy()
+
+    result = genre_publish.legacy_genres_by_album(conn, taxonomy=taxonomy)
+
+    genres = {g for g, _w in result.get("ALB1", [])}
+    assert "post_rock" in genres
+    assert "post-rock" not in genres
+
+
+def test_legacy_genres_drop_terms_the_taxonomy_rejects(tmp_path):
+    """`special purpose artist` is a MusicBrainz artist type, not a genre."""
+    meta = _make_metadata(tmp_path)
+    conn = sqlite3.connect(meta)
+    conn.row_factory = sqlite3.Row
+    conn.execute("INSERT INTO albums VALUES ('ALB1', 'A', 'X')")
+    conn.execute("INSERT INTO album_genres VALUES ('ALB1', 'Special Purpose Artist', 'musicbrainz_release')")
+    conn.commit()
+    taxonomy = load_default_layered_taxonomy()
+
+    result = genre_publish.legacy_genres_by_album(conn, taxonomy=taxonomy)
+
+    assert "ALB1" not in result or result["ALB1"] == []
+
+
 def test_legacy_genres_skip_empty_marker(tmp_path):
     meta = _make_metadata(tmp_path)
     conn = sqlite3.connect(meta)

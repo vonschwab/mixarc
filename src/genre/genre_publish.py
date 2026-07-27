@@ -349,7 +349,7 @@ def populate_authority(conn: sqlite3.Connection, key_to_album: dict[str, str]) -
 
 
 def legacy_genres_by_album(
-    conn: sqlite3.Connection, album_id: str | None = None
+    conn: sqlite3.Connection, album_id: str | None = None, taxonomy=None
 ) -> dict[str, list[tuple[str, float]]]:
     """Album-grain legacy genres: track(1.0)+album(0.8)+artist(0.5), max weight/token.
 
@@ -360,6 +360,14 @@ def legacy_genres_by_album(
 
     When ``album_id`` is given, the scan is restricted to that one album (used
     by the single-release edit path); otherwise the whole library is scanned.
+
+    With ``taxonomy``, tokens are mapped to canonical genre_ids and anything the
+    taxonomy rejects is dropped. Without it the raw token is kept, which is what
+    every caller did until 2026-07-27 — and why ``release_effective_genres``
+    carried ids like ``post-rock`` (canonical: ``post_rock``), ``world``
+    (``world_music``) and ``surf`` (``surf_rock``), plus non-genres like
+    ``special purpose artist``. Those raw strings became their own dimensions in
+    the artifact's genre vocabulary. 46 rows across 25 albums were affected.
     """
     acc: dict[str, dict[str, float]] = defaultdict(dict)
 
@@ -369,8 +377,13 @@ def legacy_genres_by_album(
             return
         per = base_weight / len(tokens)
         for tok in tokens:
-            if per > acc[aid].get(tok, 0.0):
-                acc[aid][tok] = per
+            key = tok
+            if taxonomy is not None:
+                key = _term_to_genre_id(taxonomy, tok)
+                if key is None:  # rejected / non-genre / unmappable
+                    continue
+            if per > acc[aid].get(key, 0.0):
+                acc[aid][key] = per
 
     track_sql = (
         "SELECT t.album_id, tg.genre FROM tracks t "
@@ -516,7 +529,7 @@ def build_resolved_table(conn, key_to_album: dict[str, str], taxonomy) -> None:
     graph_album_ids = {
         aid for aid, key in album_to_key.items() if key in assignment_keys
     }
-    legacy = legacy_genres_by_album(conn)
+    legacy = legacy_genres_by_album(conn, taxonomy=taxonomy)
     overrides = _overrides_by_album(conn, key_to_album, taxonomy)
 
     all_album_ids = [
