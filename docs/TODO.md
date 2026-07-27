@@ -9,15 +9,53 @@ recurring interrupt cause.
 
 ---
 
-## Artist aliases retroactively change storage keys — decouple them
+## ROOT CAUSE — album ↔ release_key identity is computed by several disagreeing rules
 
-**Opened:** 2026-07-27 · **Status:** open, scoped, not started · **Area:** identity / genre authority
+**Opened:** 2026-07-27 · **Status:** open, diagnosed, not designed · **Area:** identity / genre authority
 
-`make_release_key` → `normalize_release_artist` → `normalize_primary_artist_key`, and that
-last one applies `resolve_alias`. So **adding a line to `data/artist_aliases.yaml` changes the
-storage key of every release by that artist**, retroactively orphaning rows written under the
-old key. See memory `project_artist_alias_graph_key_coupling` for the damage that causes: the
-next genre edit rebuilds the album from a key that finds nothing and deletes its genres.
+Every genre-authority defect found on 2026-07-27 traces to one thing: **there is no single
+album → release_key mapping.** At least four rules are in play and they disagree.
+
+| Rule | Where | Used for |
+|---|---|---|
+| `make_release_key(artist, album)` — alias-resolved | `normalization.py` | edits, live lookups |
+| stored `release_key` | `release_effective_genres` | published rows |
+| stored `release_key` | sidecar `enriched_genre_signatures` | **publish's album→key map** |
+| stamped `album_id` | `genre_graph_release_genre_assignments` | (was) graph membership |
+
+**Measured symptoms, all the same root:**
+
+| Symptom | Count | Status |
+|---|---:|---|
+| Albums an edit would DESTROY (graph membership judged by stamped album_id, not key) | 31 | FIXED `a035346` |
+| Albums whose stored signature key ≠ derived key | 74 of 1585 mapped | open |
+| ...of those: `Various` compilations keyed to a *contributor* | 29 | open |
+| ...collaborations keyed to the non-primary artist | 3 | open |
+| ...alias drift (`(Sandy) Alex G` vs `Alex G`) | ~42 | open |
+| Albums stuck on the LEGACY layer despite having graph genres under their derived key | 5 | open |
+| Albums whose stored `release_effective_genres` key ≠ derived | 90 | open |
+
+Worked example — the 5 legacy-stuck albums, all compilations/collabs:
+
+```
+Joseph Shabason & Ben Gunning — Ample Habitat
+   derived: joseph shabason::ample habitat      (primary artist)
+   stored : ben gunning::ample habitat          (the OTHER artist)
+Various — Boddie Recording Company … Disc 1
+   derived: various::boddie …                   (the albums row)
+   stored : angela alexander::boddie …          (a track contributor)
+```
+
+Enrichment stored the release under an individual contributor; the album row says `Various`.
+The keys can never meet, so publish never maps the album into the graph and it falls to the
+legacy layer with 1–3 raw tags instead of its full graph genre set.
+
+**Alias resolution is one instance of this, not a separate problem.**
+`make_release_key` → `normalize_release_artist` → `normalize_primary_artist_key` applies
+`resolve_alias`, so adding a line to `data/artist_aliases.yaml` changes the storage key of
+every release by that artist and orphans rows written under the old one. See memory
+`project_artist_alias_graph_key_coupling`: the next genre edit then rebuilds the album from a
+key that finds nothing, and deletes its genres.
 
 **Cost of adding one alias today** (measured for Jimi Hendrix, 2026-07-27):
 
@@ -29,7 +67,16 @@ next genre edit rebuilds the album from a key that finds nothing and deletes its
 
 That is the price of every future alias, for a modest benefit each time.
 
-**Better investment — make storage identity alias-independent.** `identity_keys` already has
+**Direction — UNTESTED, do not build without checking it first.** Single-source the mapping:
+one function, one table, every consumer reads it. `identity_keys._primary_artist_key_raw`
+already exists (the pre-alias key, added to stop `build_artist_link_map` recursing), so
+storage identity can stop depending on the alias map. Disproof attempt run 2026-07-27: alias
+resolution currently merges only 3 release keys library-wide, and 2 of those merge on
+punctuation (`Godspeed You!` vs `Godspeed You`), so removing it from the key splits almost
+nothing. That is one failure mode ruled out, not a validated design — the compilation and
+collaboration cases above are untouched by it and need their own answer.
+
+**Superseded framing (kept for the numbers):** `identity_keys` already has
 `_primary_artist_key_raw` (the pre-alias key; it exists to stop `build_artist_link_map`
 recursing). Point `make_release_key` at that, and aliases go back to doing what they are for:
 playlist-runtime identity — artist diversity, min-gap, seed matching — without touching stored
