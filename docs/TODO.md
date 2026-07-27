@@ -119,15 +119,40 @@ specific mechanism: the transitive `is_a` family walk admits `dub`, and in *this
 `dub` is 64% non-reggae, because the tag marks a production style as often as a Jamaican
 genre.
 
-**Design directions (not yet chosen — needs a decision):**
+### THE FIX — the signal already exists and is discarded
 
-1. **Corroboration rule for family members.** A track admitted only via an umbrella family
-   genre joins the pool only if its album (or artist) also carries a core genre. Cheapest,
-   and targets the mechanism directly.
-2. **Rank core above family.** Keep family members admissible but sort them below core-genre
-   members, so the tail exhausts real reggae first. Softer; may still drift when core runs out.
-3. **Split `dub` in the taxonomy** (Jamaican dub vs dub-as-production-style). Correct at the
-   root and fixes every consumer, but it is taxonomy surgery and needs the growth loop.
+`genre_mode.pool_track_ids` builds the pool as **family (pinned at similarity 1.0) ∪ every
+genre scoring ≥ threshold (0.35) on the steering graph**, and returns the `genre_id ->
+similarity` map alongside the ids.
 
-Prefer (1) or (2); (3) is the honest long-term fix. Whichever is chosen, re-run this exact
-generation and compare `min_T` — the log above is the baseline.
+`dub` is not family — reggae's only descendant here is `roots_reggae`. It enters as a
+*similarity neighbour*, and `similarity(reggae, dub)` being high is **musically correct**. The
+defect is downstream:
+
+```python
+# playlist_generator.py:2825
+pool_ids, _sims, threshold_used = genre_mode.resolve_pool_with_relaxation(...)
+```
+
+The similarity map is computed, returned, and **thrown away** — `_sims` is touched again only
+at line 3111, for a diagnostic breakdown. From that point every pool member is equal: a
+Tortoise track admitted through `dub` is indistinguishable from an Augustus Pablo track
+admitted through `roots_reggae` at 1.0. This is the repo's signature failure mode — a value
+that is computed but never wired — and it flattens a continuous 0.35→1.0 gradient into a
+binary membership test, against Layer 4 principle 19.
+
+**Fix:** carry a per-track genre affinity (max similarity over the genres that track's album
+carries) into candidate scoring / the soft genre penalty. Family stays 1.0; neighbours score
+their actual similarity, so the tail exhausts real reggae before reaching for Tortoise.
+**Membership does not change**, so no other genre loses pool breadth.
+
+**Rejected — measured, do not retry:** *"admit a family/neighbour genre only if the album also
+carries the core genre."* Co-tag rates are ~0% across the board — 18 of soul's 18 family
+genres, 12 of hip-hop's 12 — because enrichment assigns specific leaves (`neo_soul`), never
+the umbrella (`soul`), exactly as principle 12 wants. That rule would have deleted soul's
+entire family and undone the 0.275 → 0.882 win.
+
+Splitting `dub` in the taxonomy (Jamaican dub vs dub-as-production-style) remains the honest
+root fix for the tag itself, but it is taxonomy surgery and the affinity fix does not need it.
+
+Re-run this exact generation and compare `min_T` — the log above is the baseline (0.2318).
