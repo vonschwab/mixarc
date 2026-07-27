@@ -1304,9 +1304,22 @@ def build_pier_bridge_playlist(
         ordered_seeds = [ordered_seeds[0], ordered_seeds[0]]
         num_segments = 1
         total_interior = total_tracks - 1  # Only one seed in final output
+        # Single unique seed pier, duplicated at both ends -- exactly one seed
+        # reaches the final playlist. Anchor gap insertion cannot engage here
+        # (its fallback requires >=2 artist piers), so this count is never
+        # affected by a dropped anchor.
+        _expected_seed_pier_count = 1
         logger.info("Pier+Bridge: single-seed arc mode (seed is both start and end pier)")
     else:
         _piers_before_mini = len(ordered_seeds)
+        # The number of seed piers (artist piers + any anchors gap-insertion
+        # actually placed) that should land in the final playlist. Captured
+        # BEFORE mini-pier waypoint insertion, since those are non-seed
+        # interior tracks. Review fix (spec 2026-07-27): a dropped anchor
+        # previously inflated the downstream "expected" count via the
+        # untouched pre-drop seed_indices/seed_id_set, firing a false "seed
+        # count mismatch" warning and overcounting stats["num_seeds"].
+        _expected_seed_pier_count = _piers_before_mini
         if bool(getattr(cfg, "mini_pier_enabled", False)):
             from src.playlist.pier_bridge.mini_pier_select import plan_pier_sequence
             # exclude seed/pier-artist tracks (waypoints are real piers; keep them
@@ -3756,17 +3769,21 @@ def build_pier_bridge_playlist(
             }
         )
 
-    # Recompute seed positions from final track IDs for diagnostic accuracy
+    # Recompute seed positions from final track IDs for diagnostic accuracy.
+    # Expected count is _expected_seed_pier_count (artist piers + placed
+    # anchors, excluding anchors gap-insertion legitimately dropped), not the
+    # pre-drop seed_id_set/seed_indices -- see the review-fix comment at its
+    # assignment above.
     seed_positions = [idx for idx, tid in enumerate(final_track_ids) if tid in seed_id_set]
-    if len(seed_positions) != (1 if is_single_seed_arc else len(seed_id_set)):
+    if len(seed_positions) != _expected_seed_pier_count:
         logger.warning(
             "Pier+Bridge: seed count mismatch in final result (expected %d, found %d)",
-            (1 if is_single_seed_arc else len(seed_id_set)),
+            _expected_seed_pier_count,
             len(seed_positions),
         )
 
     # Compute overall stats
-    actual_num_seeds = 1 if is_single_seed_arc else len(seed_indices)
+    actual_num_seeds = _expected_seed_pier_count
     seed_index_set = set(int(i) for i in seed_indices)
     artist_counts: Dict[str, int] = {}
     non_seed_artist_counts: Dict[str, int] = {}
