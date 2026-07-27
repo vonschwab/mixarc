@@ -166,38 +166,53 @@ specific mechanism: the transitive `is_a` family walk admits `dub`, and in *this
 `dub` is 64% non-reggae, because the tag marks a production style as often as a Jamaican
 genre.
 
-### THE FIX — the signal already exists and is discarded
+### THE MECHANISM — a non-reggae track is a structural PIER
 
-`genre_mode.pool_track_ids` builds the pool as **family (pinned at similarity 1.0) ∪ every
-genre scoring ≥ threshold (0.35) on the steering graph**, and returns the `genre_id ->
-similarity` map alongside the ids.
+The tail does not drift. It is **pulled**. The five anchor seeds were:
 
-`dub` is not family — reggae's only descendant here is `roots_reggae`. It enters as a
-*similarity neighbour*, and `similarity(reggae, dub)` being high is **musically correct**. The
-defect is downstream:
-
-```python
-# playlist_generator.py:2825
-pool_ids, _sims, threshold_used = genre_mode.resolve_pool_with_relaxation(...)
+```
+Augustus Pablo – Young Generation Dub     Bad Brains – Jah Calling
+Sonny & The Sunsets – Letters from…  <--  The Slits – Liebe And Romanze
+The Upsetters – Croaking Lizard
 ```
 
-The similarity map is computed, returned, and **thrown away** — `_sims` is touched again only
-at line 3111, for a diagnostic breakdown. From that point every pool member is equal: a
-Tortoise track admitted through `dub` is indistinguishable from an Augustus Pablo track
-admitted through `roots_reggae` at 1.0. This is the repo's signature failure mode — a value
-that is computed but never wired — and it flattens a continuous 0.35→1.0 gradient into a
-binary membership test, against Layer 4 principle 19.
+`Sonny & The Sunsets` is the **terminal pier** — it is track 30. Piers are mandatory
+waypoints, so the final segment is *required* to bridge from roots reggae into an indie-rock
+track. Positions 25–30 are that bridge. Its genre similarity to the other four seeds is 0.662
+(the others sit at 0.74–0.83), and its album is tagged `indie_rock + reggae +
+rhythm_and_blues` — so it entered through the **core `reggae` genre itself**, not through
+`dub`. Note the 2026-07-26 observation above: this same track was position 1 in the old run.
+Family seeding moved where it sits; it never stopped being a pier.
 
-**Fix:** carry a per-track genre affinity (max similarity over the genres that track's album
-carries) into candidate scoring / the soft genre penalty. Family stays 1.0; neighbours score
-their actual similarity, so the tail exhausts real reggae before reaching for Tortoise.
-**Membership does not change**, so no other genre loses pool breadth.
+**Two rejected fixes — measured, do not retry:**
 
-**Rejected — measured, do not retry:** *"admit a family/neighbour genre only if the album also
-carries the core genre."* Co-tag rates are ~0% across the board — 18 of soul's 18 family
-genres, 12 of hip-hop's 12 — because enrichment assigns specific leaves (`neo_soul`), never
-the umbrella (`soul`), exactly as principle 12 wants. That rule would have deleted soul's
-entire family and undone the 0.275 → 0.882 win.
+1. *"Admit a family/neighbour genre only if the album also carries the core genre."*
+   Co-tag rates are ~0% across the board — 18 of soul's 18 family genres, 12 of hip-hop's 12 —
+   because enrichment assigns specific leaves (`neo_soul`), never the umbrella (`soul`),
+   exactly as principle 12 wants. Would have deleted soul's entire family and undone the
+   0.275 → 0.882 win.
+2. *"`pool_track_ids` returns a genre→similarity map that `playlist_generator.py:2825`
+   discards into `_sims`; carry it into scoring."* True that it is discarded — but the signal
+   is **not missing**. Measured against a reggae core centroid:
+
+   | | raw 442-dim | dense 64-dim | vs actual seeds |
+   |---|---:|---:|---:|
+   | core reggae | 0.931–0.935 | 0.997–0.999 | 0.864 |
+   | Tortoise | 0.286 | 0.426 | 0.357 |
+   | Bill Callahan | 0.562 | **0.949** | 0.872 |
+
+   The beam already has this. Adding pool affinity would be redundant.
+
+**Unresolved, worth a look:** the log says `Genre hard gate applied: 0 candidates excluded
+(floor=0.652)`, yet Tortoise/Gigi/Peaking Lights measure 0.36–0.51 against the seeds — below
+that floor. Either they never reach that gate (segment pools may be built separately from the
+gated candidate pool) or the gate's similarity is not what was measured here. Resolve before
+designing anything.
+
+**No fix proposed.** Three hypotheses died on contact with a measurement; the honest next step
+is to find where pier selection admits a genre-atypical anchor, and whether the existing
+sonic pier-bridgeability veto (`project_pier_bridgeability`) has a genre analogue. Baseline to
+beat: `min_T = 0.2318` in the log above.
 
 Splitting `dub` in the taxonomy (Jamaican dub vs dub-as-production-style) remains the honest
 root fix for the tag itself, but it is taxonomy surgery and the affinity fix does not need it.
