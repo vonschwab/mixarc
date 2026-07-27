@@ -166,7 +166,46 @@ specific mechanism: the transitive `is_a` family walk admits `dub`, and in *this
 `dub` is 64% non-reggae, because the tag marks a production style as often as a Jamaican
 genre.
 
-### THE MECHANISM — a non-reggae track is a structural PIER
+### CORRECTED 2026-07-27 (Dylan) — the pier is legitimate; the TAGS are wrong
+
+Dylan: *The Diving Kind* was recorded with a largely African band and **is** reggae plus
+afrobeat/highlife. So the terminal pier is a correct choice and the "contaminated pier"
+framing below is wrong on the music. What is wrong is the **genre data**, in three
+compounding ways — none of which is the compression:
+
+**1. Artist-name collisions inject another artist's genres.** `Gigi — Illuminated Audio` (the
+Bill Laswell dub reworking of the Ethiopian singer) published as `dance, dub, trance`. Its
+ALBUM tags said `african, ambient, dub, electronic`; its ARTIST tags said `dance, dream
+trance, italo dance, trance` — a **different Gigi**, an Italo-dance act. The authority took the
+artist tags and dropped `african`. Same failure as the 2026-06-12 Last.fm collision
+("Green-House" → a Ukrainian hip-hop act, ~76 artists), still live via MusicBrainz artist
+lookups.
+
+**2. Artist-level tags are not down-weighted.** `layered_assignment.SOURCE_RELIABILITY` has one
+`musicbrainz: 0.75` bucket, so `musicbrainz_artist` (a career tag) carries the same authority
+as `musicbrainz_release` (this record). `legacy_genres_by_album` gets it right —
+track 1.0 / album 0.8 / artist 0.5 — and the enrichment path does not. This is how
+`indie_rock` (from `surf rock`/`indie` artist tags) landed on an African-band reggae record.
+
+**3. World/African records are under-tagged.** *The Diving Kind* carries no `afrobeat` or
+`highlife`; the taxonomy has both. Gigi's `african` was dropped. Nothing in Sonny's raw
+sources said reggae at all — the AI enrichment inferred it unaided, which is a point in its
+favour, but it stopped short.
+
+**Compression is NOT the problem — measured.** Over 40k random pairs: Pearson r(raw, dense)
+= 0.728; of 36,744 genuinely-unrelated pairs (raw < 0.20) only **0.4%** exceed dense 0.6 and
+**0.0%** exceed 0.8. The dense embedding is not flattening distinctions. Bill Callahan's
+raw 0.562 → dense 0.949 is likely correct, not an artifact: *Have Fun With God* is a dub
+record and carries `reggae` tags.
+
+**Directions — UNTESTED.** Split `musicbrainz` into release/artist reliability tiers so album
+evidence outranks career tags; and treat artist-level tags for short/generic artist names as
+unverified. Neither is validated. The name-collision half has prior art — see the
+genre-data-authority skill's trap catalog.
+
+---
+
+### SUPERSEDED — "a non-reggae track is a structural PIER" (wrong on the music, kept for the mechanics)
 
 The tail does not drift. It is **pulled**. The five anchor seeds were:
 
