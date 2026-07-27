@@ -316,7 +316,8 @@ _BOOTLEG_NUMERIC_DATE = re.compile(
     r"|\b\d{1,2}[/.\-]\d{1,2}[/.\-](?:19|20)\d{2}\b"      # 20.09.2019, 6/30/1999
 )
 _BOOTLEG_MONTH_DATE = re.compile(
-    r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+"
+    r"\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?"
+    r"|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?\s+"
     r"\d{1,2}(?:st|nd|rd|th)?,?\s*(?:19|20)\d{2}\b",       # August 18, 1967 / July 4th 2008
     re.IGNORECASE,
 )

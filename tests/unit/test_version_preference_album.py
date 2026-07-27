@@ -61,6 +61,15 @@ def test_bootleg_penalty_does_not_stack_with_live_keyword():
     assert calculate_version_preference_score("Song", "Live In Dallas 12/06/2006") == 70
 
 
+def test_bootleg_month_regex_does_not_match_month_prefix_words():
+    # The month-name pattern must not anchor on any word merely STARTING with a
+    # month prefix ("marquee" ~ "mar", "decade" ~ "dec") -- it needs an explicit
+    # month-name alternation, not a wildcard tail. Real month-date detection
+    # (August 18, 1967 / July 4th 2008) must be unaffected -- covered above.
+    assert calculate_version_preference_score("Song", "Marquee 1977") == 100
+    assert calculate_version_preference_score("Song", "Decade 1999") == 100
+
+
 def test_dedupe_logs_when_duration_decides_a_tie(caplog):
     import logging as _logging
     # Two versions, tied on score (neither album flags), winner 60% longer.

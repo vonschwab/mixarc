@@ -943,10 +943,12 @@ def generate_playlist_ds(
                 _pool_albums = _load_albums_for_indices(bundle, pool_indices, _meta_db)
             except Exception:
                 _pool_albums = {}
-            if not _pool_albums:
+            if pool_indices and not _pool_albums:
                 logger.warning(
-                    "Pool dedupe: album lookup returned nothing - version preference is "
-                    "title-only for this run (live albums with clean titles will not be caught)."
+                    "Pool dedupe: album lookup returned nothing for db=%s - version "
+                    "preference is title-only for this run (live albums with clean "
+                    "titles will not be caught).",
+                    _meta_db,
                 )
             pool_indices = dedupe_pool_by_track_key(
                 bundle, pool_indices, albums_by_index=_pool_albums
@@ -1232,6 +1234,24 @@ def generate_playlist_ds(
                     )
                     retry_pool.stats["target_length"] = num_tracks
                     retry_pool_indices = list(getattr(retry_pool, "eligible_indices", retry_pool.pool_indices))
+                    # The relaxed floors admit indices that were NOT in the original
+                    # pool, so the original _pool_albums map is stale for this retry.
+                    # Recompute it for retry_pool_indices (same construction as the
+                    # original pool, above) before dedupe -- otherwise newly admitted
+                    # indices score title-only inside the same dedupe group as
+                    # album-aware ones.
+                    try:
+                        from src.playlist.artist_style import _load_albums_for_indices
+                        _pool_albums = _load_albums_for_indices(bundle, retry_pool_indices, _meta_db)
+                    except Exception:
+                        _pool_albums = {}
+                    if retry_pool_indices and not _pool_albums:
+                        logger.warning(
+                            "One-Each retry pool dedupe: album lookup returned nothing "
+                            "for db=%s - version preference is title-only for this "
+                            "retry (live albums with clean titles will not be caught).",
+                            _meta_db,
+                        )
                     retry_pool_indices = dedupe_pool_by_track_key(
                         bundle, retry_pool_indices, albums_by_index=_pool_albums
                     )
