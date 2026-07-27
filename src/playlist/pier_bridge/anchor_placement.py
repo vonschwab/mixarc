@@ -33,12 +33,16 @@ class AnchorPlacement:
                                artist piers g and g+1. Ordered by gap index.
     ``dropped_clamped``     -- anchors dropped because K > P-1 (lowest rank first).
     ``dropped_unbridgeable``-- anchors dropped because no gap met ``min_bridge``.
+    ``dropped_displaced``   -- anchors dropped because cleared the floor in at least
+                               one gap but lost all viable gaps to higher-scoring
+                               competitors.
     """
 
     sequence: List[int]
     placed: List[Tuple[int, int]]
     dropped_clamped: List[int]
     dropped_unbridgeable: List[int]
+    dropped_displaced: List[int]
 
 
 def place_anchors_in_gaps(
@@ -71,7 +75,7 @@ def place_anchors_in_gaps(
     if num_gaps < 1 or not ranked:
         return AnchorPlacement(
             sequence=list(piers), placed=[], dropped_clamped=list(ranked),
-            dropped_unbridgeable=[],
+            dropped_unbridgeable=[], dropped_displaced=[],
         )
 
     kept = ranked[:num_gaps]
@@ -121,7 +125,7 @@ def place_anchors_in_gaps(
 
     placed_by_gap = {g: kept[i] for i, g in best_assignment}
     placed_anchor_ids = set(placed_by_gap.values())
-    dropped_unbridgeable += [
+    dropped_displaced = [
         a for i, a in enumerate(kept) if i in eligible and a not in placed_anchor_ids
     ]
 
@@ -136,4 +140,5 @@ def place_anchors_in_gaps(
         placed=sorted(((a, g) for g, a in placed_by_gap.items()), key=lambda t: t[1]),
         dropped_clamped=dropped_clamped,
         dropped_unbridgeable=dropped_unbridgeable,
+        dropped_displaced=dropped_displaced,
     )
