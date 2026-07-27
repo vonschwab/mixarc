@@ -127,6 +127,111 @@ def test_apply_edit_no_op_when_unchanged(tmp_path):
     assert res2.added == [] and res2.removed == []
 
 
+def test_apply_edit_keeps_user_leaf_that_also_has_an_inferred_row(tmp_path):
+    """A user genre that ALSO appears as an inferred graph row keeps its leaf row.
+
+    Regression (found 2026-07-27 on Dua Lipa's "Radical Optimism (Extended)"):
+    ``add_ids = target_ids - non_user_ids`` and ``non_user_ids`` spanned every
+    layer, so a genre the user asserted as ``observed_leaf`` that the graph also
+    carried as ``inferred_parent`` got no user row on rewrite. It survived only
+    as the inferred row — and the artifact builder excludes inferred layers from
+    ``X_genre_raw``, so the genre silently left the generation vector.
+    """
+    from src.genre import genre_edit, genre_publish
+    from src.ai_genre_enrichment.layered_taxonomy import load_default_layered_taxonomy
+    from src.ai_genre_enrichment.storage import SidecarStore
+
+    meta = _edit_dbs(tmp_path)
+    store = SidecarStore(str(tmp_path / "s.db"))
+    store.initialize()
+    taxonomy = load_default_layered_taxonomy()
+
+    electro_id = genre_publish._term_to_genre_id(taxonomy, "electropop")
+    house_id = genre_publish._term_to_genre_id(taxonomy, "house")
+    assert electro_id and house_id and electro_id != house_id
+
+    # Graph carries house as a leaf and electropop only as an inferred parent.
+    meta.execute(
+        "INSERT INTO genre_graph_release_genre_assignments "
+        "VALUES ('the radio dept::pet grief','ORPH1',?,'observed_leaf',0.9)", (house_id,))
+    meta.execute(
+        "INSERT INTO genre_graph_release_genre_assignments "
+        "VALUES ('the radio dept::pet grief','ORPH1',?,'inferred_parent',0.5)", (electro_id,))
+    # Published state: the user additionally asserted electropop as a leaf.
+    meta.execute("INSERT INTO release_effective_genres "
+                 "VALUES ('ORPH1','k',?, 'observed_leaf',0.9,'graph')", (house_id,))
+    meta.execute("INSERT INTO release_effective_genres "
+                 "VALUES ('ORPH1','k',?, 'inferred_parent',0.5,'graph')", (electro_id,))
+    meta.execute("INSERT INTO release_effective_genres "
+                 "VALUES ('ORPH1','k',?, 'observed_leaf',1.0,'user')", (electro_id,))
+    meta.commit()
+
+    # A user opens the dialog (chips = every published name) and adds one genre.
+    genre_edit.apply_user_genre_edit(
+        meta, store, taxonomy, artist="The  Radio Dept.", album="Pet Grief",
+        target_names=["house", "electropop", "dream pop"])
+
+    layers = {
+        (r[0], r[1])
+        for r in meta.execute(
+            "SELECT genre_id, assignment_layer FROM release_effective_genres "
+            "WHERE album_id='ORPH1'")
+    }
+    assert (electro_id, "observed_leaf") in layers, (
+        "electropop lost its observed_leaf row and survives only as inferred"
+    )
+
+
+def test_apply_edit_does_not_promote_an_unasserted_inferred_genre(tmp_path):
+    """An inferred genre nobody asserted stays inferred, even though it's in the target.
+
+    The edit dialog seeds its chips from every published layer, so the target set
+    routinely contains inferred hub families. Promoting those to ``observed_leaf``
+    would bake hub genres into ``X_genre_raw`` at full weight — the 2026-06-12
+    genre-vector saturation incident. Guards the fix for
+    ``test_apply_edit_keeps_user_leaf_that_also_has_an_inferred_row`` from
+    over-correcting.
+    """
+    from src.genre import genre_edit, genre_publish
+    from src.ai_genre_enrichment.layered_taxonomy import load_default_layered_taxonomy
+    from src.ai_genre_enrichment.storage import SidecarStore
+
+    meta = _edit_dbs(tmp_path)
+    store = SidecarStore(str(tmp_path / "s.db"))
+    store.initialize()
+    taxonomy = load_default_layered_taxonomy()
+
+    house_id = genre_publish._term_to_genre_id(taxonomy, "house")
+    pop_id = genre_publish._term_to_genre_id(taxonomy, "pop")
+    assert house_id and pop_id and house_id != pop_id
+
+    meta.execute(
+        "INSERT INTO genre_graph_release_genre_assignments "
+        "VALUES ('the radio dept::pet grief','ORPH1',?,'observed_leaf',0.9)", (house_id,))
+    meta.execute(
+        "INSERT INTO genre_graph_release_genre_assignments "
+        "VALUES ('the radio dept::pet grief','ORPH1',?,'inferred_family',0.4)", (pop_id,))
+    meta.execute("INSERT INTO release_effective_genres "
+                 "VALUES ('ORPH1','k',?, 'observed_leaf',0.9,'graph')", (house_id,))
+    meta.execute("INSERT INTO release_effective_genres "
+                 "VALUES ('ORPH1','k',?, 'inferred_family',0.4,'graph')", (pop_id,))
+    meta.commit()
+
+    # Chips carry the inferred family; the user only adds dream pop.
+    genre_edit.apply_user_genre_edit(
+        meta, store, taxonomy, artist="The  Radio Dept.", album="Pet Grief",
+        target_names=["house", "pop", "dream pop"])
+
+    rows = {
+        (r[0], r[1], r[2])
+        for r in meta.execute(
+            "SELECT genre_id, assignment_layer, source FROM release_effective_genres "
+            "WHERE album_id='ORPH1'")
+    }
+    assert (pop_id, "inferred_family", "graph") in rows
+    assert (pop_id, "observed_leaf", "user") not in rows, "hub family promoted to a leaf"
+
+
 def test_apply_edit_removes_graph_genre(tmp_path):
     """Removing a graph-sourced genre drops it from the authority and records a
     remove override (diffed against the non-user base, so publish reproduces it)."""
