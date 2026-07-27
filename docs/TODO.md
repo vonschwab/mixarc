@@ -204,7 +204,29 @@ are all King Tubby / Augustus Pablo / Roots Radics / Keith Hudson, 0.500–0.509
 track sits in the **bottom half** — Callahan 0.202 (rank 355/590). They are the periphery, and
 they appear because they are the pier's neighbourhood, not because they are hubs.
 
-### ALSO — the TAGS are wrong (separate, real, smaller)
+### TAG FIX APPLIED 2026-07-27 — corrected the data, changed the playlist NOT AT ALL
+
+Fixed both albums (user overrides, so a republish reproduces them):
+
+- `Gigi — Illuminated Audio`: removed `dance` + `trance` (they came from a same-named
+  Italo-dance artist), asserted `dub` + `ambient` + `electronic`. Vector is now
+  `['ambient','dub','electronic']`.
+- `Sonny & The Sunsets — The Diving Kind`: added `afrobeat` + `highlife`, kept `indie_rock`
+  (Dylan's call). Vector is now `['afrobeat','highlife','indie rock','reggae','rhythm and
+  blues']`.
+
+Re-ran the same generation. **`min_transition` is bit-identical: 0.2317550946809825 → same.**
+Same tracks, same order, same three weakest edges; only the genre component of the worst edge
+moved, 0.408 → 0.400. Gigi's dense similarity to the reggae core went 0.490 → 0.499 — the
+correct tags are no nearer reggae than the wrong ones were.
+
+**This is corroboration, not a failure.** It independently confirms the mechanism above: the
+worst edge is sonic (S=0.485), driven by a peripheral pier and its diffuse neighbourhood, and
+genre tags are a minor term in that score. Fixing tags was worth doing for data correctness —
+the record is no longer described by another musician's genres — but **tag quality is not the
+lever for this defect.** Path-aware bridgeability remains the only untested candidate.
+
+### ALSO — the raw tag inputs are wrong (separate, real, smaller)
 
 Dylan: *The Diving Kind* was recorded with a largely African band and **is** reggae plus
 afrobeat/highlife. So the terminal pier is a correct choice and the "contaminated pier"
