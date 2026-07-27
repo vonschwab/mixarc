@@ -59,3 +59,27 @@ def test_bootleg_detection_does_not_false_positive_on_year_only_titles():
 def test_bootleg_penalty_does_not_stack_with_live_keyword():
     # An album that is BOTH date-named and keyword-live gets one -30, not two.
     assert calculate_version_preference_score("Song", "Live In Dallas 12/06/2006") == 70
+
+
+def test_dedupe_logs_when_duration_decides_a_tie(caplog):
+    import logging as _logging
+    # Two versions, tied on score (neither album flags), winner 60% longer.
+    titles = ["Bootleg Song", "Bootleg Song"]
+    durations = np.array([320000, 200000], dtype=float)
+    albums = {0: "Roskilde Festival", 1: "The Studio LP"}
+    with caplog.at_level(_logging.DEBUG, logger="src.playlist.artist_style"):
+        kept = _dedupe_artist_indices([0, 1], titles, durations, albums)
+    assert kept == [0]  # behaviour unchanged: longer still wins
+    assert any("possible undetected live take" in r.message for r in caplog.records)
+
+
+def test_dedupe_does_not_log_when_scores_differ(caplog):
+    import logging as _logging
+    # Album IS detected as live -> scores differ -> no tie, so no diagnostic.
+    titles = ["Song", "Song"]
+    durations = np.array([320000, 200000], dtype=float)
+    albums = {0: "1999/07/04 Chicago, IL", 1: "The Studio LP"}
+    with caplog.at_level(_logging.DEBUG, logger="src.playlist.artist_style"):
+        kept = _dedupe_artist_indices([0, 1], titles, durations, albums)
+    assert kept == [1]  # Task 1 detection makes the studio cut win outright
+    assert not any("possible undetected live take" in r.message for r in caplog.records)
