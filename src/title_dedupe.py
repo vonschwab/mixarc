@@ -305,6 +305,30 @@ _LIVE_ALBUM_MARKERS = (
     "live bootleg", "bbc session", "peel session", "live session",
 )
 
+# Bootleg/soundboard releases named by DATE and/or VENUE rather than by a live keyword —
+# "2004/08/20 Asheville, NC", "Manchester 20.09.2019", "Battery Park, NYC: July 4th 2008".
+# These tied studio cuts at 100, and the duration tie-break then took the longer take,
+# which is almost always the live one. A full DATE is required: a bare "City, ST" or a
+# lone year matches too many real album titles (measured: requiring a date gives 10 hits
+# across 3517 library albums with zero false positives).
+_BOOTLEG_NUMERIC_DATE = re.compile(
+    r"\b(?:19|20)\d{2}[/.\-]\d{1,2}[/.\-]\d{1,2}\b"      # 2004/08/20, 1987.05.22
+    r"|\b\d{1,2}[/.\-]\d{1,2}[/.\-](?:19|20)\d{2}\b"      # 20.09.2019, 6/30/1999
+)
+_BOOTLEG_MONTH_DATE = re.compile(
+    r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+"
+    r"\d{1,2}(?:st|nd|rd|th)?,?\s*(?:19|20)\d{2}\b",       # August 18, 1967 / July 4th 2008
+    re.IGNORECASE,
+)
+
+
+def _is_bootleg_album_name(album_lower: str) -> bool:
+    """True when an album name is a date-stamped bootleg/soundboard release."""
+    return bool(
+        _BOOTLEG_NUMERIC_DATE.search(album_lower)
+        or _BOOTLEG_MONTH_DATE.search(album_lower)
+    )
+
 
 def calculate_version_preference_score(title: str, album: str = "") -> int:
     """
@@ -330,7 +354,11 @@ def calculate_version_preference_score(title: str, album: str = "") -> int:
     # (e.g. Unwound "Live Leaves") that match none of the phrase markers, while NOT
     # firing on substrings like "Alive"/"Olive"/"Deliver".
     album_lower = str(album or "").lower()
-    if re.search(r"\blive\b", album_lower) or any(m in album_lower for m in _LIVE_ALBUM_MARKERS):
+    if (
+        re.search(r"\blive\b", album_lower)
+        or any(m in album_lower for m in _LIVE_ALBUM_MARKERS)
+        or _is_bootleg_album_name(album_lower)
+    ):
         score -= 30
 
     # Penalize version indicators

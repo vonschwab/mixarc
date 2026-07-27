@@ -31,3 +31,31 @@ def test_dedupe_album_aware_beats_duration_tiebreak():
     assert _dedupe_artist_indices([0, 1], titles, durations, None) == [0]
     # With album info: the studio version wins despite being shorter — the fix.
     assert _dedupe_artist_indices([0, 1], titles, durations, albums) == [1]
+
+
+def test_version_preference_penalizes_date_named_bootlegs():
+    # Date/venue bootlegs carry NO live keyword — they tied studio at 100 before this fix.
+    assert calculate_version_preference_score("Kool Thing", "2004/08/20 Asheville, NC") == 70
+    assert calculate_version_preference_score("Schizophrenia", "1987/05/22 Trenton, NJ") == 70
+    assert calculate_version_preference_score("Pretend", "Manchester 20.09.2019") == 70
+    assert calculate_version_preference_score("Jonsi", "6/30/1999: Reykjavik, Iceland (Limited Edition)") == 70
+    # Month-name dates.
+    assert calculate_version_preference_score("100%", "Battery Park, NYC: July 4th 2008") == 70
+    assert calculate_version_preference_score("Foxey Lady", "Hollywood Bowl | August 18, 1967") == 70
+    # The studio cut is unaffected.
+    assert calculate_version_preference_score("Kool Thing", "Goo [24bit]") == 100
+
+
+def test_bootleg_detection_does_not_false_positive_on_year_only_titles():
+    # A bare year, or a place with no date, must NOT flag — that is why the pattern
+    # requires a full date. These are real album-title shapes.
+    assert calculate_version_preference_score("Song", "1999") == 100
+    assert calculate_version_preference_score("Song", "Berlin") == 100
+    assert calculate_version_preference_score("Song", "Chicago, IL") == 100
+    assert calculate_version_preference_score("Song", "Summer 2008") == 100
+    assert calculate_version_preference_score("Song", "Version 2.0") == 100
+
+
+def test_bootleg_penalty_does_not_stack_with_live_keyword():
+    # An album that is BOTH date-named and keyword-live gets one -30, not two.
+    assert calculate_version_preference_score("Song", "Live In Dallas 12/06/2006") == 70
