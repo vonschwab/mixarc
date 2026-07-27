@@ -13,6 +13,7 @@ import dataclasses
 import logging
 import re
 import sqlite3
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -724,6 +725,162 @@ def test_phase_b_anchors_rollback_seed_only_piers():
     assert not intruders, (
         f"anchor_max=0 (rollback) still injected non-seed anchor pier(s): {intruders} "
         f"(realized piers={piers})"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Anchor PLACEMENT (spec docs/superpowers/specs/2026-07-27-tag-steering-anchor-
+# placement.md). Phase B guaranteed anchors APPEAR; this pins WHERE they land.
+# The defect: appending anchors and re-ordering all piers as co-equals let three
+# cluster and one take the closing seat (Sonic Youth + art rock/indie rock,
+# 2026-07-27 -- the playlist ended on Built To Spill).
+#
+# Anchor-ness is re-derived here from the published genre AUTHORITY
+# (_nonseed_authority_on_tag_ids), an INDEPENDENT re-read -- not a call back into
+# the production selection path.
+# ─────────────────────────────────────────────────────────────────────────────
+
+SONIC_YOUTH = "Sonic Youth"
+SY_TAGS = ["art rock", "indie rock"]
+
+# Real generations here run 45-90 minutes of wall clock each (large ~10-12k track
+# candidate pools, 5 segments per pier-bridge). Only THREE distinct generations are
+# actually required across the four tests below: SY(art rock, indie rock) w/ gap
+# insertion ON, BoC(hauntology) w/ gap insertion ON, and BoC(hauntology) w/ gap
+# insertion OFF. test_anchor_never_terminal_sonic_youth and
+# test_no_two_anchors_adjacent_sonic_youth are two assertions over the SAME SY
+# generation; test_anchor_guarantee_survives_placement_boc and the live arm of
+# test_gap_insertion_rollback_reproduces_legacy_placement are two assertions over the
+# SAME BoC/gap-insertion-ON generation. _cached_full_generation memoizes by the exact
+# (artist, tags, anchor_max, gap_insertion, track_count) key so each distinct case
+# runs exactly once and is shared -- module-level cache, so it survives regardless of
+# test execution order. _select_piers is NOT cached: it short-circuits before the beam
+# search (raises _PiersCaptured out of _maybe_generate_ds_playlist), so it is cheap on
+# every call and each call re-derives piers correctly.
+_GENERATION_CACHE: dict = {}
+
+
+def _cached_full_generation(artist_name, tags, *, anchor_max=3, gap_insertion=True,
+                             track_count=30):
+    """Runs the real create_playlist_for_artist ONCE per distinct case and caches it.
+
+    Returns {"result": ..., "track_ids": [...], "elapsed_s": float}. gap_insertion=False
+    mutates the pier_bridge config on a freshly-built generator instance (mirroring the
+    rollback lever #22 test's original direct-mutation idiom) so it never bleeds into
+    the gap_insertion=True generator, which is a separate instance.
+    """
+    key = (str(artist_name), tuple(tags), int(anchor_max), bool(gap_insertion), int(track_count))
+    if key in _GENERATION_CACHE:
+        return _GENERATION_CACHE[key]
+
+    gen = _artist_generator(list(tags), anchor_max=anchor_max)
+    if not gap_insertion:
+        pb = gen.config.config["playlists"]["ds_pipeline"]["pier_bridge"]
+        pb["tag_steering_anchor_gap_insertion"] = False
+
+    t0 = time.monotonic()
+    result = gen.create_playlist_for_artist(
+        artist_name=artist_name, track_count=track_count,
+        popular_seeds_mode="off", random_seed=0,
+    )
+    elapsed_s = time.monotonic() - t0
+    assert result is not None, (
+        f"generation returned None for {artist_name} tags={tags} gap_insertion={gap_insertion}"
+    )
+    track_ids = [str(t.get("rating_key") or t.get("track_id")) for t in result["tracks"]]
+    entry = {"result": result, "track_ids": track_ids, "elapsed_s": elapsed_s}
+    _GENERATION_CACHE[key] = entry
+    return entry
+
+
+def _realized_pier_sequence(artist_name, tags, *, track_count=30, anchor_max=3,
+                             gap_insertion=True):
+    """(playlist_track_ids, pier_ids_in_realized_order, anchor_id_set), derived from a
+    CACHED generation (see _cached_full_generation) -- so multiple tests pinning
+    different invariants over the SAME (artist, tags, anchor_max, gap_insertion) case
+    share one real generation instead of each triggering their own.
+
+    Piers are captured with the cheap _select_piers path (uncached, short-circuits
+    before the beam) and then located inside the cached generation's output, so the
+    returned sequence is the order the LISTENER hears -- exactly what the two rules
+    constrain.
+    """
+    entry = _cached_full_generation(
+        artist_name, tags, anchor_max=anchor_max, gap_insertion=gap_insertion,
+        track_count=track_count,
+    )
+    track_ids = entry["track_ids"]
+    pier_ids = _select_piers(
+        artist_name, tags, popular_seeds_mode="off", anchor_max=anchor_max,
+        track_count=track_count,
+    )
+    pier_set = {str(p) for p in pier_ids}
+    realized = [t for t in track_ids if t in pier_set]
+    anchors = _nonseed_authority_on_tag_ids(tags, artist_name, _db_path())
+    return track_ids, realized, {str(a) for a in anchors}
+
+
+@pytest.mark.integration
+@pytest.mark.slow
+@_requires_artifact
+def test_anchor_never_terminal_sonic_youth():
+    """Rule 1: an anchor is never terminal. The reported defect verbatim -- the
+    playlist must open AND close on a pier that is not an anchor."""
+    _tracks, realized, anchor_ids = _realized_pier_sequence(SONIC_YOUTH, SY_TAGS)
+    assert len(realized) >= 3, f"too few piers realized: {realized}"
+    assert realized[0] not in anchor_ids, f"playlist OPENS on an anchor: {realized}"
+    assert realized[-1] not in anchor_ids, f"playlist CLOSES on an anchor: {realized}"
+
+
+@pytest.mark.integration
+@pytest.mark.slow
+@_requires_artifact
+def test_no_two_anchors_adjacent_sonic_youth():
+    """Rule 2: no two anchors adjacent in the pier sequence. Shares the SY generation
+    with test_anchor_never_terminal_sonic_youth via _cached_full_generation -- this is
+    a separately-named, independently-failing test over the same real playlist, not a
+    merge of the two invariants."""
+    _tracks, realized, anchor_ids = _realized_pier_sequence(SONIC_YOUTH, SY_TAGS)
+    adjacent = [
+        (a, b) for a, b in zip(realized, realized[1:])
+        if a in anchor_ids and b in anchor_ids
+    ]
+    assert not adjacent, f"adjacent anchor piers {adjacent} in sequence {realized}"
+
+
+@pytest.mark.integration
+@pytest.mark.slow
+@_requires_artifact
+def test_anchor_guarantee_survives_placement_boc():
+    """Placement must not cost us the Phase-B guarantee: BoC + hauntology still
+    gets its non-BoC Ghost Box anchors, they are just seated differently. Shares the
+    BoC/gap-insertion-ON generation with the live arm of
+    test_gap_insertion_rollback_reproduces_legacy_placement."""
+    _tracks, realized, anchor_ids = _realized_pier_sequence(BOC, ["hauntology"])
+    placed = [p for p in realized if p in anchor_ids]
+    assert len(placed) >= 2, (
+        f"anchor guarantee weakened: only {len(placed)} anchor pier(s) placed "
+        f"(realized piers={realized})"
+    )
+    assert realized[0] not in anchor_ids and realized[-1] not in anchor_ids, realized
+
+
+@pytest.mark.integration
+@pytest.mark.slow
+@_requires_artifact
+def test_gap_insertion_rollback_reproduces_legacy_placement():
+    """Rollback lever (#22): tag_steering_anchor_gap_insertion=false must restore
+    the legacy append + global re-order path, so the two rules are NOT enforced by
+    something else further down. The live (gap_insertion=True) arm shares its
+    generation with test_anchor_guarantee_survives_placement_boc; only the legacy
+    (gap_insertion=False) arm is a generation unique to this test."""
+    legacy = _cached_full_generation(BOC, ["hauntology"], anchor_max=3, gap_insertion=False)
+    live = _cached_full_generation(BOC, ["hauntology"], anchor_max=3, gap_insertion=True)
+    legacy_ids = legacy["track_ids"]
+    live_ids = live["track_ids"]
+    assert legacy_ids != live_ids, (
+        "rollback produced an identical playlist -- either the flag is not wired "
+        "or gap insertion changed nothing for this case"
     )
 
 
