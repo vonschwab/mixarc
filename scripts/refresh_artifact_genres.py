@@ -59,9 +59,31 @@ def main() -> int:
         print("  WARNING: original had genre smoothing but no --genre-sim-path given; "
               "refreshed X_genre_smoothed will equal X_genre_raw. Pass the sim path to match.")
 
-    # Resolver (enriched genres are authoritative)
+    # Refresh with the SAME genre source the artifact was built with. Reading it
+    # from the artifact's own build_config rather than defaulting: this script
+    # previously always attached an EnrichedGenreResolver and never passed
+    # use_graph_genres, so on a graph-sourced artifact it rebuilt from the
+    # deprecated enriched_genre_signatures layer instead of the published
+    # authority. On 2026-07-27 that dry run showed vocab 442 -> 1013, 628 tracks
+    # LOSING genres, and the Yuji canary going from chamber music/modern
+    # classical to 'rock'. Same class as the 2026-06-11 incident where the
+    # builder hardcoded genre_source='legacy' and enrichment never reached
+    # generation (genre-data-authority skill, trap catalog).
+    build_config = data.get("build_config")
+    if build_config is not None and getattr(build_config, "shape", None) == ():
+        build_config = build_config.item()
+    genre_source = (build_config or {}).get("genre_source") if isinstance(build_config, dict) else None
+    if genre_source is None:
+        print("  ERROR: artifact has no build_config.genre_source; refusing to guess "
+              "which genre layer to rebuild from.", file=sys.stderr)
+        return 2
+    print(f"  genre_source (from artifact build_config): {genre_source}")
+
     resolver = None
-    if args.sidecar_db.exists():
+    if genre_source == "graph":
+        # The authority IS the source; the enriched sidecar must not override it.
+        print("  enriched resolver: disabled (graph authority is the source)")
+    elif args.sidecar_db.exists():
         from src.ai_genre_enrichment.genre_resolver import EnrichedGenreResolver
         resolver = EnrichedGenreResolver(str(args.sidecar_db))
         print(f"  enriched resolver: {args.sidecar_db.name}")
@@ -70,6 +92,7 @@ def main() -> int:
     genre_lists, vocab, stats = load_genres_for_tracks(
         str(args.db), track_ids, normalize_genres=True,
         tracks_metadata=None, enriched_resolver=resolver,
+        use_graph_genres=(genre_source == "graph"),
     )
     new_raw, new_smoothed = build_genre_matrices(genre_lists, vocab, args.genre_sim_path)
 
