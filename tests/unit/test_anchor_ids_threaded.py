@@ -6,6 +6,7 @@ times (beam widths at half config, a dead pace gate, a silently-disabled
 dj_bridging), so the hop chain gets its own test rather than trusting the diff.
 """
 import inspect
+import logging
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -177,19 +178,22 @@ def test_generator_forwards_anchor_ids_to_runner(monkeypatch):
     assert seen.get("tag_anchor_track_ids") == {"k0", "k1"}
 
 
-def test_generator_narrows_tag_anchor_ids_when_blacklisted(monkeypatch):
-    """Task 6 Part 1: narrow tag_anchor_track_ids to the pier ids actually being
-    handed down, BEFORE the runner handoff. A blacklisted anchor legitimately
-    stops being a pier (playlist_generator.py ~793-805 strips it out of
-    anchor_seed_ids_resolved) while still sitting in tag_anchor_track_ids --
-    that must be narrowed out here so Part 2's builder-side warning (a genuine
-    anomaly warning) never fires for this benign, expected case.
+def _build_anchor_narrowing_test_generator(monkeypatch, *, blacklisted_ids):
+    """Shared harness for Task 6 Part 1 tests: a PlaylistGenerator built via
+    __new__ (bypassing __init__, same pattern as
+    test_generator_forwards_anchor_ids_to_runner) with a fake 3-row bundle
+    (seed t0, anchors k0/k1), a stubbed blacklist, and run_ds_pipeline
+    monkeypatched to capture kwargs and short-circuit.
 
     This needs the title+artist re-resolution path (anchor_seed_tracks with
     >1 entries) to actually run, because blacklist filtering only touches
     anchor_seed_ids_resolved -- the raw anchor_seed_ids param is never
     blacklist-filtered. So the fake bundle carries track_artists/track_titles
     that resolve every supplied anchor_seed_track to a real bundle row.
+
+    Returns (gen, anchor_seed_tracks, seen) where `seen` is populated with the
+    kwargs forwarded to run_ds_pipeline once the caller invokes
+    gen._maybe_generate_ds_playlist(...).
     """
     gen = PlaylistGenerator.__new__(PlaylistGenerator)
 
@@ -227,10 +231,10 @@ def test_generator_narrows_tag_anchor_ids_when_blacklisted(monkeypatch):
     )
     monkeypatch.setattr(playlist_generator_module, "load_artifact_bundle", lambda path: fake_bundle)
     # Stub the blacklist source directly (per the brief) rather than the
-    # metadata client -- k1 is the one anchor that is blacklisted.
-    monkeypatch.setattr(gen, "_get_blacklisted_track_ids", lambda: {"k1"})
+    # metadata client.
+    monkeypatch.setattr(gen, "_get_blacklisted_track_ids", lambda: set(blacklisted_ids))
 
-    seen = {}
+    seen: dict = {}
 
     def _fake_run_ds_pipeline(**kwargs):
         seen.update(kwargs)
@@ -243,17 +247,93 @@ def test_generator_narrows_tag_anchor_ids_when_blacklisted(monkeypatch):
         {"rating_key": "k0", "title": "K0Title", "artist": "ForeignA"},
         {"rating_key": "k1", "title": "K1Title", "artist": "ForeignB"},
     ]
+    return gen, anchor_seed_tracks, seen
 
-    try:
-        gen._maybe_generate_ds_playlist(
-            seed_track_id="t0",
-            target_length=10,
-            anchor_seed_tracks=anchor_seed_tracks,
-            tag_anchor_track_ids={"k0", "k1"},
-        )
-    except RuntimeError:
-        pass
+
+def test_generator_narrows_tag_anchor_ids_when_blacklisted(monkeypatch, caplog):
+    """Task 6 Part 1: narrow tag_anchor_track_ids to the pier ids actually being
+    handed down, BEFORE the runner handoff. A blacklisted anchor legitimately
+    stops being a pier (playlist_generator.py ~793-805 strips it out of
+    anchor_seed_ids_resolved) while still sitting in tag_anchor_track_ids --
+    that must be narrowed out here so Part 2's builder-side warning (a genuine
+    anomaly warning) never fires for this benign, expected case. This PARTIAL
+    loss (only k1 of {k0, k1} is blacklisted) must emit the INFO line and must
+    NOT escalate to the total-loss WARNING -- crying wolf on a routine partial
+    drop is exactly what the review follow-up warned against.
+    """
+    gen, anchor_seed_tracks, seen = _build_anchor_narrowing_test_generator(
+        monkeypatch, blacklisted_ids={"k1"}
+    )
+
+    with caplog.at_level(logging.INFO, logger="src.playlist_generator"):
+        try:
+            gen._maybe_generate_ds_playlist(
+                seed_track_id="t0",
+                target_length=10,
+                anchor_seed_tracks=anchor_seed_tracks,
+                tag_anchor_track_ids={"k0", "k1"},
+            )
+        except RuntimeError:
+            pass
 
     # k1 was blacklisted -> stripped from anchor_seed_ids_resolved upstream ->
     # Part 1 must narrow it out of tag_anchor_track_ids before the handoff.
     assert seen.get("tag_anchor_track_ids") == {"k0"}
+
+    records = [r for r in caplog.records if r.name == "src.playlist_generator"]
+    info_msgs = [
+        r.message for r in records
+        if r.levelno == logging.INFO and "no longer among the piers" in r.message
+    ]
+    warn_msgs = [
+        r.message for r in records
+        if r.levelno == logging.WARNING and "lost before reaching the pipeline" in r.message
+    ]
+    assert len(info_msgs) == 1, [r.message for r in records]
+    assert "k1" in info_msgs[0]
+    assert not warn_msgs, warn_msgs
+
+
+def test_generator_warns_when_all_tag_anchor_ids_lost(monkeypatch, caplog):
+    """Review follow-up (2026-07-27): when Part 1's narrowing empties
+    tag_anchor_track_ids entirely (e.g. every candidate anchor was
+    blacklisted -- reachable, since select_on_tag_anchors has no blacklist
+    awareness), the builder's own gate (`if tag_anchor_gap_insertion and
+    tag_anchor_track_ids:`) goes false and its "NONE matched a pier" warning
+    never runs. Before Task 6 this scenario reliably WARNed (the unfiltered
+    ids reached the builder and its own resolution found zero overlap); Part 1
+    must not silently regress that down to an INFO line -- it has to escalate
+    to WARNING itself, naming the lost ids, since it is the last site that
+    still knows anchors were ever requested.
+    """
+    gen, anchor_seed_tracks, seen = _build_anchor_narrowing_test_generator(
+        monkeypatch, blacklisted_ids={"k0", "k1"}
+    )
+
+    with caplog.at_level(logging.INFO, logger="src.playlist_generator"):
+        try:
+            gen._maybe_generate_ds_playlist(
+                seed_track_id="t0",
+                target_length=10,
+                anchor_seed_tracks=anchor_seed_tracks,
+                tag_anchor_track_ids={"k0", "k1"},
+            )
+        except RuntimeError:
+            pass
+
+    assert seen.get("tag_anchor_track_ids") == set()
+
+    records = [r for r in caplog.records if r.name == "src.playlist_generator"]
+    warn_msgs = [
+        r.message for r in records
+        if r.levelno == logging.WARNING and "lost before reaching the pipeline" in r.message
+    ]
+    assert len(warn_msgs) == 1, [r.message for r in records]
+    assert "k0" in warn_msgs[0] and "k1" in warn_msgs[0]
+
+    # The total-loss WARNING must REPLACE the partial-loss INFO, not join it.
+    info_msgs = [
+        r.message for r in records
+        if r.levelno == logging.INFO and "no longer among the piers" in r.message
+    ]
+    assert not info_msgs, info_msgs

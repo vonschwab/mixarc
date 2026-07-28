@@ -922,13 +922,31 @@ class PlaylistGenerator:
                     for tid in tag_anchor_track_ids
                     if str(tid) not in _dropped_tag_anchor_ids
                 }
-                logger.info(
-                    "Tag steering anchors: %d id(s) no longer among the piers being passed "
-                    "to the pipeline (most often blacklist exclusion) -- dropping from "
-                    "tag_anchor_track_ids before handoff: %s",
-                    len(_dropped_tag_anchor_ids),
-                    sorted(_dropped_tag_anchor_ids),
-                )
+                if not tag_anchor_track_ids:
+                    # Review follow-up (2026-07-27): an empty narrowed set makes the
+                    # builder's own gate (`if tag_anchor_gap_insertion and
+                    # tag_anchor_track_ids:`) falsy, so its "NONE matched a pier"
+                    # warning never runs -- this site is the only place left that
+                    # still knows anchors were ever requested, so it must escalate
+                    # itself rather than let the total loss go unreported. Unlike
+                    # the partial-loss INFO below, don't claim blacklist as the
+                    # cause: narrowing here is purely pier-membership, so a total
+                    # loss is just as likely to mean garbage/unresolvable ids.
+                    logger.warning(
+                        "Tag steering anchors: ALL %d supplied anchor id(s) were lost "
+                        "before reaching the pipeline -- none are among the piers being "
+                        "passed, gap insertion cannot act: %s",
+                        len(_dropped_tag_anchor_ids),
+                        sorted(_dropped_tag_anchor_ids),
+                    )
+                else:
+                    logger.info(
+                        "Tag steering anchors: %d id(s) no longer among the piers being passed "
+                        "to the pipeline (most often blacklist exclusion) -- dropping from "
+                        "tag_anchor_track_ids before handoff: %s",
+                        len(_dropped_tag_anchor_ids),
+                        sorted(_dropped_tag_anchor_ids),
+                    )
 
         audit_context_extra_effective: Optional[Dict[str, Any]] = None
         if audit_context_extra is not None:
