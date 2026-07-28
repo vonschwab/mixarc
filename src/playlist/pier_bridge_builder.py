@@ -1225,6 +1225,36 @@ def build_pier_bridge_playlist(
             )
             _anchor_indices = []
             _artist_pier_indices = list(seed_indices)
+        elif len(tag_anchor_track_ids) > len(_anchor_indices):
+            # Task 6 (2026-07-27): some anchors matched a pier (the branches above
+            # didn't fire), but not ALL of them did -- a partial loss. By this point
+            # playlist_generator has already narrowed tag_anchor_track_ids to ids it
+            # believed were still piers (blacklist exclusion, the only known benign
+            # cause, is filtered out upstream), so anything still missing here is a
+            # genuine anomaly worth naming, not a routine occurrence. Report the two
+            # loss categories distinctly: ids that never resolved to a bundle row at
+            # all, vs. ids that resolved but weren't among this run's piers.
+            _seed_index_set = set(seed_indices)
+            _unresolved_ids: List[str] = []
+            _resolved_not_pier_ids: List[str] = []
+            for _tid in tag_anchor_track_ids:
+                _tid_s = str(_tid)
+                _idx = bundle.track_id_to_index.get(_tid_s)
+                if _idx is None:
+                    _unresolved_ids.append(_tid_s)
+                elif _idx not in _seed_index_set:
+                    _resolved_not_pier_ids.append(_tid_s)
+            logger.warning(
+                "Tag steering anchor placement: %d of %d supplied anchor id(s) were lost "
+                "before placement -- unresolved_in_bundle=%s resolved_but_not_pier=%s; "
+                "proceeding with the %d matched anchor(s). This is unexpected (known benign "
+                "causes are filtered upstream) -- investigate if it recurs.",
+                len(_unresolved_ids) + len(_resolved_not_pier_ids),
+                len(tag_anchor_track_ids),
+                sorted(_unresolved_ids),
+                sorted(_resolved_not_pier_ids),
+                len(_anchor_indices),
+            )
 
     _to_order = _artist_pier_indices
 

@@ -164,9 +164,96 @@ def test_generator_forwards_anchor_ids_to_runner(monkeypatch):
         gen._maybe_generate_ds_playlist(
             seed_track_id="t0",
             target_length=10,
+            # Task 6 Part 1 narrows tag_anchor_track_ids to the pier ids actually
+            # being handed down; anchor_seed_ids is the fallback pier set when
+            # anchor_seed_tracks resolution doesn't run (as here), so k0/k1 must
+            # appear there too for this pure-forwarding probe to stay meaningful.
+            anchor_seed_ids=["k0", "k1"],
             tag_anchor_track_ids={"k0", "k1"},
         )
     except RuntimeError:
         pass
 
     assert seen.get("tag_anchor_track_ids") == {"k0", "k1"}
+
+
+def test_generator_narrows_tag_anchor_ids_when_blacklisted(monkeypatch):
+    """Task 6 Part 1: narrow tag_anchor_track_ids to the pier ids actually being
+    handed down, BEFORE the runner handoff. A blacklisted anchor legitimately
+    stops being a pier (playlist_generator.py ~793-805 strips it out of
+    anchor_seed_ids_resolved) while still sitting in tag_anchor_track_ids --
+    that must be narrowed out here so Part 2's builder-side warning (a genuine
+    anomaly warning) never fires for this benign, expected case.
+
+    This needs the title+artist re-resolution path (anchor_seed_tracks with
+    >1 entries) to actually run, because blacklist filtering only touches
+    anchor_seed_ids_resolved -- the raw anchor_seed_ids param is never
+    blacklist-filtered. So the fake bundle carries track_artists/track_titles
+    that resolve every supplied anchor_seed_track to a real bundle row.
+    """
+    gen = PlaylistGenerator.__new__(PlaylistGenerator)
+
+    cfg = MagicMock()
+
+    def _cfg_get(*args, **kwargs):
+        if args[:2] == ("playlists", "ds_pipeline"):
+            return {"artifact_path": "fake_artifact.npz"}
+        return kwargs.get("default")
+
+    cfg.get.side_effect = _cfg_get
+    cfg.config = {}
+    cfg.recently_played_lookback_days = 0
+    gen.config = cfg
+
+    metadata = MagicMock()
+    metadata.fetch_blacklisted_track_ids.return_value = []
+    metadata.fetch_track_durations.return_value = {}
+    metadata.fetch_track_ids_by_duration_limits.return_value = set()
+    gen.metadata = metadata
+
+    gen.library = MagicMock()
+    gen.lastfm = None
+    gen.matcher = None
+    gen._logged_ds_artifact_warning = True
+    gen._last_ds_report = None
+    gen._audit_run_enabled = False
+    gen._audit_run_dir = None
+
+    fake_bundle = SimpleNamespace(
+        track_id_to_index={"t0": 0, "k0": 1, "k1": 2},
+        track_ids=["t0", "k0", "k1"],
+        track_artists=["SeedArtist", "ForeignA", "ForeignB"],
+        track_titles=["T0", "K0Title", "K1Title"],
+    )
+    monkeypatch.setattr(playlist_generator_module, "load_artifact_bundle", lambda path: fake_bundle)
+    # Stub the blacklist source directly (per the brief) rather than the
+    # metadata client -- k1 is the one anchor that is blacklisted.
+    monkeypatch.setattr(gen, "_get_blacklisted_track_ids", lambda: {"k1"})
+
+    seen = {}
+
+    def _fake_run_ds_pipeline(**kwargs):
+        seen.update(kwargs)
+        raise RuntimeError("stop after the handoff")
+
+    monkeypatch.setattr(playlist_generator_module, "run_ds_pipeline", _fake_run_ds_pipeline)
+
+    anchor_seed_tracks = [
+        {"rating_key": "t0", "title": "T0", "artist": "SeedArtist"},
+        {"rating_key": "k0", "title": "K0Title", "artist": "ForeignA"},
+        {"rating_key": "k1", "title": "K1Title", "artist": "ForeignB"},
+    ]
+
+    try:
+        gen._maybe_generate_ds_playlist(
+            seed_track_id="t0",
+            target_length=10,
+            anchor_seed_tracks=anchor_seed_tracks,
+            tag_anchor_track_ids={"k0", "k1"},
+        )
+    except RuntimeError:
+        pass
+
+    # k1 was blacklisted -> stripped from anchor_seed_ids_resolved upstream ->
+    # Part 1 must narrow it out of tag_anchor_track_ids before the handoff.
+    assert seen.get("tag_anchor_track_ids") == {"k0"}

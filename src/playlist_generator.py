@@ -896,6 +896,40 @@ class PlaylistGenerator:
         if anchor_seed_ids_resolved:
             logger.info("Passing %d anchor_seed_ids to pipeline: %s", len(anchor_seed_ids_resolved), anchor_seed_ids_resolved[:5])
 
+        # Tag steering (Task 6, 2026-07-27): narrow tag_anchor_track_ids to the pier
+        # ids that are actually being handed down BEFORE the pipeline call, so a
+        # tag anchor that stopped being a pier upstream (most commonly: blacklist
+        # filtering above, ~line 793) never reaches the builder's diagnostic in a
+        # state that would look like a genuine anomaly. This is diagnostics-only
+        # narrowing -- it does not change which tracks get selected or excluded,
+        # only which ids the builder is told to expect as anchors.
+        if tag_anchor_track_ids:
+            _effective_pier_ids = {
+                str(pid)
+                for pid in (
+                    anchor_seed_ids_resolved
+                    if anchor_seed_ids_resolved is not None
+                    else (anchor_seed_ids or [])
+                )
+            }
+            _effective_pier_ids.add(str(seed_to_use))
+            _dropped_tag_anchor_ids = {
+                str(tid) for tid in tag_anchor_track_ids if str(tid) not in _effective_pier_ids
+            }
+            if _dropped_tag_anchor_ids:
+                tag_anchor_track_ids = {
+                    str(tid)
+                    for tid in tag_anchor_track_ids
+                    if str(tid) not in _dropped_tag_anchor_ids
+                }
+                logger.info(
+                    "Tag steering anchors: %d id(s) no longer among the piers being passed "
+                    "to the pipeline (most often blacklist exclusion) -- dropping from "
+                    "tag_anchor_track_ids before handoff: %s",
+                    len(_dropped_tag_anchor_ids),
+                    sorted(_dropped_tag_anchor_ids),
+                )
+
         audit_context_extra_effective: Optional[Dict[str, Any]] = None
         if audit_context_extra is not None:
             audit_context_extra_effective = dict(audit_context_extra)

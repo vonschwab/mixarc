@@ -252,3 +252,61 @@ def test_placed_anchors_count_toward_num_seeds_when_none_dropped():
     res = _run(tag_anchor_track_ids={"k0", "k1"})
     assert res.success, res.failure_reason
     assert res.stats["num_seeds"] == 5, res.stats["num_seeds"]
+
+
+# ---------------------------------------------------------------------------
+# Task 6 (2026-07-27): a PARTIAL anchor loss -- some anchor ids matched a pier,
+# some did not -- must warn distinctly instead of staying silent. This is the
+# gap the earlier "NONE matched" / "too few artist piers" branches don't cover:
+# neither fires when SOME anchors matched, so a partial loss used to be mute.
+# ---------------------------------------------------------------------------
+
+
+def test_partial_loss_resolved_not_pier_warns_and_places_matched_anchors(caplog):
+    """k0/k1 are valid anchors (placed normally); f0 resolves to a real bundle
+    row but was never one of the piers handed to the builder -- WARN naming it
+    as resolved_but_not_pier, while placement proceeds (no fallback) for k0/k1."""
+    with caplog.at_level(logging.WARNING):
+        res = _run(tag_anchor_track_ids={"k0", "k1", "f0"})
+    assert res.success, res.failure_reason
+    records = [
+        r for r in caplog.records if r.name.startswith("src.playlist.pier_bridge_builder")
+    ]
+    partial = [r for r in records if "were lost before placement" in r.message]
+    assert len(partial) == 1, [r.message for r in records]
+    assert "f0" in partial[0].message
+    assert "resolved_but_not_pier=['f0']" in partial[0].message
+    assert "unresolved_in_bundle=[]" in partial[0].message
+    assert not any("NONE matched a pier" in r.message for r in records)
+    order = _pier_order(res)
+    assert order[0].startswith("a") and order[-1].startswith("a"), order
+    assert set(order) == {"a0", "a1", "a2", "k0", "k1"}, order
+
+
+def test_partial_loss_unresolved_in_bundle_warns_and_names_id(caplog):
+    """A requested anchor id that doesn't resolve to ANY bundle row is reported
+    in the unresolved_in_bundle bucket, distinct from resolved_but_not_pier."""
+    with caplog.at_level(logging.WARNING):
+        res = _run(tag_anchor_track_ids={"k0", "k1", "ghost-id"})
+    assert res.success, res.failure_reason
+    records = [
+        r for r in caplog.records if r.name.startswith("src.playlist.pier_bridge_builder")
+    ]
+    partial = [r for r in records if "were lost before placement" in r.message]
+    assert len(partial) == 1, [r.message for r in records]
+    assert "unresolved_in_bundle=['ghost-id']" in partial[0].message
+    assert "resolved_but_not_pier=[]" in partial[0].message
+    order = _pier_order(res)
+    assert set(order) == {"a0", "a1", "a2", "k0", "k1"}, order
+
+
+def test_matched_anchors_stay_quiet_no_partial_loss_warning(caplog):
+    """Happy path: every anchor id matches a pier -- NO partial-loss warning.
+    A warning that fires on a normal run trains everyone to ignore the log."""
+    with caplog.at_level(logging.WARNING):
+        res = _run(tag_anchor_track_ids={"k0", "k1"})
+    assert res.success, res.failure_reason
+    assert not any(
+        "were lost before placement" in r.message
+        for r in caplog.records if r.name.startswith("src.playlist.pier_bridge_builder")
+    ), [r.message for r in caplog.records]
