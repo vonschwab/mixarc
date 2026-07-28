@@ -575,6 +575,78 @@ not exist yet; don't look for a `tag_steering_beam_weight` key. Tests:
 
 ---
 
+## Knob 6c: On-tag anchor placement (Phase B)
+
+**Use when:** artist-mode tag steering should GUARANTEE a peripheral on-tag clique appears (e.g. a
+Ghost Box record under Boards of Canada + hauntology), not just lean the pool/pier scoring toward
+it. Phase A (Knob 6b) can't guarantee this — a sonically-peripheral on-tag track can fall below the
+seed-artist genre gate and never get bridged to.
+
+```yaml
+playlists:
+  ds_pipeline:
+    pier_bridge:
+      tag_steering_anchor_max: 3            # on-tag tracks injected as piers (0 = Phase-A-only / off)
+      tag_steering_anchor_min_bridge: 0.35  # min sonic cosine to a seed pier for an anchor to qualify
+      tag_steering_anchor_per_artist: 1     # per-artist cap within the anchor set
+      tag_steering_anchor_gap_insertion: true
+```
+
+**What the anchors are.** Up to `tag_steering_anchor_max` on-tag tracks by OTHER artists are
+injected as un-droppable PIERS (not just bridge candidates) — selected to be bridgeable to a seed
+pier, tag-central, and cross-artist-diverse. Inert (byte-identical to legacy) unless tag steering
+resolved on-tag ids for the run.
+
+**Placement (`tag_steering_anchor_gap_insertion`, spec 2026-07-27).** The naive approach — append
+anchors to the artist piers and let the normal co-equal seed-ordering step
+(`_order_seeds_by_bridgeability`) re-sequence everything — let anchors cluster adjacent to each
+other and land on a terminal seat (the reported defect: a Sonic Youth playlist that opened or
+closed on an injected anchor, and a Boards of Canada run with three anchors bunched at consecutive
+positions). Gap insertion fixes this structurally with two rules:
+
+- **Never terminal** — an anchor can never occupy position 0 or the last position. The artist piers
+  alone are ordered first (`_order_seeds_by_bridgeability` runs over artist piers only, anchors
+  excluded), which also fixes their terminals; anchors are then inserted into the **interior gaps**
+  between them.
+- **Non-adjacent** — at most one anchor lands per gap, so two anchors can never sit back-to-back.
+
+Assignment is a minimax objective: for anchor `a` and gap `g` between ordered artist piers
+`(p_i, p_{i+1})`, `score(a, g) = min(bridge(a, p_i), bridge(a, p_{i+1}))` — the weaker flanking
+edge is what's scored, since that's the edge that will actually get built. The assignment is
+exhaustive over injective anchor→gap maps (cheap at `K<=3`, `P-1<=9`), maximizing the worst
+assigned score, ties broken by total score then lowest gap index for determinism.
+
+**Feasibility clamp.** P artist piers create P−1 interior gaps, one anchor per gap max:
+`K <= P-1`. `target_pier_count` floors at 3 and `anchor_max` defaults to 3, so the P=3 case
+(K=3 > P-1=2) is a real, reachable infeasibility — the excess anchor(s) are dropped by selection
+rank (least tag-central first), logged at INFO naming the dropped track_ids (never a silent cap).
+An anchor can also be dropped if its best gap scores below `tag_steering_anchor_min_bridge`
+(unbridgeable to either flanking pier) or if it loses its best gap to a higher-scoring anchor in
+the exhaustive assignment (displaced) — both logged separately.
+
+**Rollback.** `tag_steering_anchor_gap_insertion: false` reproduces the legacy behavior: anchors
+appended to the artist piers as co-equal seeds, then the whole set re-ordered together by
+`_order_seeds_by_bridgeability` — the path that let anchors cluster/terminate. Kept as an escape
+hatch, not the shipped default.
+
+**Measured (2026-07-27, live DB + artifact, `random_seed=0`, same-session anchor_max=0
+baselines — see `docs/run_audits/2026-07-27-anchor-placement-validation.md`):** Boards of Canada +
+hauntology: 2/3 anchors placed into gaps [1,2] (1 dropped, unbridgeable), worst edge improved
+0.651→0.711. Brian Eno + neoclassical: 3/3 anchors placed into gaps [0,1,2], worst edge unchanged
+to four decimals (0.7714 both arms) — notably this is the case that previously (pre-gap-insertion,
+2026-07-09) regressed hard under Phase B (0.133 with anchors vs 0.528 baseline, because
+bridgeability was checked only against the nearest seed pier, not the two piers an anchor would
+actually sit between); the gap-insertion minimax objective scores exactly the pair an anchor will
+bridge to, which is consistent with fixing that failure mode (one seed, one day — not proven
+across seeds/configs). See the evidence doc for the full case-by-case numbers, the Alvvays + twee
+result, and the §B seed-ordering side-effect finding.
+
+**Status:** shipped default (`config.example.yaml`). Tests: `test_phase_b_anchors_*`,
+`test_anchor_never_terminal_sonic_youth`, `test_no_two_anchors_adjacent_sonic_youth`,
+`test_anchor_guarantee_survives_placement_boc`, `test_gap_insertion_rollback_reproduces_legacy_placement`.
+
+---
+
 ## The collapse-prevention stack (Knobs 7–9)
 
 Long bridges tend to **sag**: interior tracks drift toward the dense, genre-blurred "average" of

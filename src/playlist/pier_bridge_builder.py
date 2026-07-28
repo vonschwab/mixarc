@@ -472,6 +472,18 @@ def build_pier_bridge_playlist(
     sonic_mode: Optional[str] = None,
     popularity_ranks: Optional[np.ndarray] = None,
     popularity_rank_cutoff: Optional[int] = None,
+    # Tag-steering ANCHOR placement (spec 2026-07-27). The bundle track_ids of the
+    # on-tag anchors playlist_generator injected into the pier list. EXPLICIT --
+    # never derived from "artist != seed artist", because this builder is shared
+    # with genre mode, whose piers are cross-artist by design. Empty/None => the
+    # pier set and its ordering are byte-identical to the pre-2026-07-27 path.
+    tag_anchor_track_ids: Optional[set[str]] = None,
+    # Rollback lever (config: playlists.ds_pipeline.pier_bridge.
+    # tag_steering_anchor_gap_insertion). False = legacy append + global re-order.
+    tag_anchor_gap_insertion: bool = True,
+    # Floor a placed anchor's weaker flanking edge must clear; mirrors the
+    # selection-time tag_steering_anchor_min_bridge.
+    tag_anchor_min_bridge: float = 0.35,
 ) -> PierBridgeResult:
     """
     Build playlist using pier + bridge strategy.
@@ -1178,12 +1190,80 @@ def build_pier_bridge_playlist(
             "message": f"Unknown seed_ordering '{seed_ordering}', defaulting to auto.",
         })
         seed_ordering = "auto"
+    # Tag-steering anchors are ordered SEPARATELY (spec 2026-07-27): the artist
+    # piers alone define the sequence and its terminals, then anchors are inserted
+    # into the interior gaps. Appending them and re-ordering everything as
+    # co-equals is what let three anchors cluster and one take the closing seat
+    # (Sonic Youth, 2026-07-27). Empty anchor set => this whole block is inert and
+    # ordering is byte-identical to the legacy path.
+    _anchor_indices: List[int] = []
+    _artist_pier_indices: List[int] = list(seed_indices)
+    if tag_anchor_gap_insertion and tag_anchor_track_ids:
+        _anchor_row_set = {
+            idx
+            for idx in (
+                bundle.track_id_to_index.get(str(tid)) for tid in tag_anchor_track_ids
+            )
+            if idx is not None
+        }
+        # Selection rank == order of appearance among the piers (playlist_generator
+        # appends anchors in rank order and every hop preserves it).
+        _anchor_indices = [i for i in seed_indices if i in _anchor_row_set]
+        _artist_pier_indices = [i for i in seed_indices if i not in _anchor_row_set]
+        if not _anchor_indices:
+            logger.warning(
+                "Tag steering anchor placement: %d anchor id(s) supplied but NONE "
+                "matched a pier -- gap insertion cannot act; falling back to legacy "
+                "co-equal ordering.",
+                len(tag_anchor_track_ids),
+            )
+        elif len(_artist_pier_indices) < 2:
+            logger.warning(
+                "Tag steering anchor placement: only %d artist pier(s) -- no interior "
+                "gap exists; falling back to legacy co-equal ordering for %d anchor(s).",
+                len(_artist_pier_indices), len(_anchor_indices),
+            )
+            _anchor_indices = []
+            _artist_pier_indices = list(seed_indices)
+        elif len(tag_anchor_track_ids) > len(_anchor_indices):
+            # Task 6 (2026-07-27): some anchors matched a pier (the branches above
+            # didn't fire), but not ALL of them did -- a partial loss. By this point
+            # playlist_generator has already narrowed tag_anchor_track_ids to ids it
+            # believed were still piers (blacklist exclusion, the only known benign
+            # cause, is filtered out upstream), so anything still missing here is a
+            # genuine anomaly worth naming, not a routine occurrence. Report the two
+            # loss categories distinctly: ids that never resolved to a bundle row at
+            # all, vs. ids that resolved but weren't among this run's piers.
+            _seed_index_set = set(seed_indices)
+            _unresolved_ids: List[str] = []
+            _resolved_not_pier_ids: List[str] = []
+            for _tid in tag_anchor_track_ids:
+                _tid_s = str(_tid)
+                _idx = bundle.track_id_to_index.get(_tid_s)
+                if _idx is None:
+                    _unresolved_ids.append(_tid_s)
+                elif _idx not in _seed_index_set:
+                    _resolved_not_pier_ids.append(_tid_s)
+            logger.warning(
+                "Tag steering anchor placement: %d of %d supplied anchor id(s) were lost "
+                "before placement -- unresolved_in_bundle=%s resolved_but_not_pier=%s; "
+                "proceeding with the %d matched anchor(s). This is unexpected (known benign "
+                "causes are filtered upstream) -- investigate if it recurs.",
+                len(_unresolved_ids) + len(_resolved_not_pier_ids),
+                len(tag_anchor_track_ids),
+                sorted(_unresolved_ids),
+                sorted(_resolved_not_pier_ids),
+                len(_anchor_indices),
+            )
+
+    _to_order = _artist_pier_indices
+
     if bool(cfg.dj_bridging_enabled) and seed_ordering == "fixed":
-        ordered_seeds = list(seed_indices)
+        ordered_seeds = list(_to_order)
     else:
         if bool(cfg.dj_bridging_enabled):
             ordered_seeds = _order_seeds_by_bridgeability(
-                seed_indices,
+                _to_order,
                 X_full_norm,
                 X_start_norm,
                 X_end_norm,
@@ -1195,8 +1275,52 @@ def build_pier_bridge_playlist(
             )
         else:
             ordered_seeds = _order_seeds_by_bridgeability(
-                seed_indices, X_full_norm, X_start_norm, X_end_norm,
+                _to_order, X_full_norm, X_start_norm, X_end_norm,
                 min_bottleneck=bool(cfg.roam_corridors_enabled),
+            )
+
+    if _anchor_indices:
+        from src.playlist.pier_bridge.anchor_placement import place_anchors_in_gaps
+
+        def _anchor_pair_score(a: int, b: int) -> float:
+            return _compute_bridgeability_score(
+                int(a), int(b), X_full_norm, X_start_norm, X_end_norm
+            )
+
+        _placement = place_anchors_in_gaps(
+            ordered_seeds,
+            _anchor_indices,
+            _anchor_pair_score,
+            min_bridge=float(tag_anchor_min_bridge),
+        )
+        ordered_seeds = list(_placement.sequence)
+        logger.info(
+            "Tag steering anchor placement: %d/%d anchor(s) placed into gaps %s "
+            "(artist piers=%d)",
+            len(_placement.placed), len(_anchor_indices),
+            [g for _a, g in _placement.placed], len(_artist_pier_indices),
+        )
+        if _placement.dropped_clamped:
+            logger.info(
+                "Tag steering anchor placement: dropped %d anchor(s) -- only %d "
+                "interior gap(s) for %d anchor(s) (K <= P-1): %s",
+                len(_placement.dropped_clamped), len(_artist_pier_indices) - 1,
+                len(_anchor_indices),
+                [str(bundle.track_ids[i]) for i in _placement.dropped_clamped],
+            )
+        if _placement.dropped_unbridgeable:
+            logger.info(
+                "Tag steering anchor placement: dropped %d anchor(s) with no gap "
+                "clearing min_bridge=%.2f: %s",
+                len(_placement.dropped_unbridgeable), float(tag_anchor_min_bridge),
+                [str(bundle.track_ids[i]) for i in _placement.dropped_unbridgeable],
+            )
+        if _placement.dropped_displaced:
+            logger.info(
+                "Tag steering anchor placement: dropped %d anchor(s) that cleared "
+                "min_bridge=%.2f but lost their gap to a higher-scoring anchor: %s",
+                len(_placement.dropped_displaced), float(tag_anchor_min_bridge),
+                [str(bundle.track_ids[i]) for i in _placement.dropped_displaced],
             )
 
     logger.info("Pier+Bridge: seed order = %s",
@@ -1210,8 +1334,22 @@ def build_pier_bridge_playlist(
         ordered_seeds = [ordered_seeds[0], ordered_seeds[0]]
         num_segments = 1
         total_interior = total_tracks - 1  # Only one seed in final output
+        # Single unique seed pier, duplicated at both ends -- exactly one seed
+        # reaches the final playlist. Anchor gap insertion cannot engage here
+        # (its fallback requires >=2 artist piers), so this count is never
+        # affected by a dropped anchor.
+        _expected_seed_pier_count = 1
         logger.info("Pier+Bridge: single-seed arc mode (seed is both start and end pier)")
     else:
+        _piers_before_mini = len(ordered_seeds)
+        # The number of seed piers (artist piers + any anchors gap-insertion
+        # actually placed) that should land in the final playlist. Captured
+        # BEFORE mini-pier waypoint insertion, since those are non-seed
+        # interior tracks. Review fix (spec 2026-07-27): a dropped anchor
+        # previously inflated the downstream "expected" count via the
+        # untouched pre-drop seed_indices/seed_id_set, firing a false "seed
+        # count mismatch" warning and overcounting stats["num_seeds"].
+        _expected_seed_pier_count = _piers_before_mini
         if bool(getattr(cfg, "mini_pier_enabled", False)):
             from src.playlist.pier_bridge.mini_pier_select import plan_pier_sequence
             # exclude seed/pier-artist tracks (waypoints are real piers; keep them
@@ -1238,7 +1376,7 @@ def build_pier_bridge_playlist(
                 balance_gaps=bool(getattr(cfg, "mini_pier_balance_gaps", False)),
             )
             logger.info("Mini-piers: %d waypoint(s) inserted (piers now %d)",
-                        len(ordered_seeds) - num_seeds, len(ordered_seeds))
+                        len(ordered_seeds) - _piers_before_mini, len(ordered_seeds))
         num_segments = len(ordered_seeds) - 1
         total_interior = total_tracks - len(ordered_seeds)
 
@@ -3661,17 +3799,21 @@ def build_pier_bridge_playlist(
             }
         )
 
-    # Recompute seed positions from final track IDs for diagnostic accuracy
+    # Recompute seed positions from final track IDs for diagnostic accuracy.
+    # Expected count is _expected_seed_pier_count (artist piers + placed
+    # anchors, excluding anchors gap-insertion legitimately dropped), not the
+    # pre-drop seed_id_set/seed_indices -- see the review-fix comment at its
+    # assignment above.
     seed_positions = [idx for idx, tid in enumerate(final_track_ids) if tid in seed_id_set]
-    if len(seed_positions) != (1 if is_single_seed_arc else len(seed_id_set)):
+    if len(seed_positions) != _expected_seed_pier_count:
         logger.warning(
             "Pier+Bridge: seed count mismatch in final result (expected %d, found %d)",
-            (1 if is_single_seed_arc else len(seed_id_set)),
+            _expected_seed_pier_count,
             len(seed_positions),
         )
 
     # Compute overall stats
-    actual_num_seeds = 1 if is_single_seed_arc else len(seed_indices)
+    actual_num_seeds = _expected_seed_pier_count
     seed_index_set = set(int(i) for i in seed_indices)
     artist_counts: Dict[str, int] = {}
     non_seed_artist_counts: Dict[str, int] = {}

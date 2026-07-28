@@ -600,6 +600,7 @@ class PlaylistGenerator:
         dry_run: bool = False,
         audit_context_extra: Optional[Dict[str, Any]] = None,
         pace_mode: Optional[str] = None,
+        tag_anchor_track_ids: Optional[Set[str]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Run DS pipeline and return ordered track dicts; raise on failure.
@@ -895,6 +896,58 @@ class PlaylistGenerator:
         if anchor_seed_ids_resolved:
             logger.info("Passing %d anchor_seed_ids to pipeline: %s", len(anchor_seed_ids_resolved), anchor_seed_ids_resolved[:5])
 
+        # Tag steering (Task 6, 2026-07-27): narrow tag_anchor_track_ids to the pier
+        # ids that are actually being handed down BEFORE the pipeline call, so a
+        # tag anchor that stopped being a pier upstream (most commonly: blacklist
+        # filtering above, ~line 793) never reaches the builder's diagnostic in a
+        # state that would look like a genuine anomaly. This is diagnostics-only
+        # narrowing -- it does not change which tracks get selected or excluded,
+        # only which ids the builder is told to expect as anchors.
+        if tag_anchor_track_ids:
+            _effective_pier_ids = {
+                str(pid)
+                for pid in (
+                    anchor_seed_ids_resolved
+                    if anchor_seed_ids_resolved is not None
+                    else (anchor_seed_ids or [])
+                )
+            }
+            _effective_pier_ids.add(str(seed_to_use))
+            _dropped_tag_anchor_ids = {
+                str(tid) for tid in tag_anchor_track_ids if str(tid) not in _effective_pier_ids
+            }
+            if _dropped_tag_anchor_ids:
+                tag_anchor_track_ids = {
+                    str(tid)
+                    for tid in tag_anchor_track_ids
+                    if str(tid) not in _dropped_tag_anchor_ids
+                }
+                if not tag_anchor_track_ids:
+                    # Review follow-up (2026-07-27): an empty narrowed set makes the
+                    # builder's own gate (`if tag_anchor_gap_insertion and
+                    # tag_anchor_track_ids:`) falsy, so its "NONE matched a pier"
+                    # warning never runs -- this site is the only place left that
+                    # still knows anchors were ever requested, so it must escalate
+                    # itself rather than let the total loss go unreported. Unlike
+                    # the partial-loss INFO below, don't claim blacklist as the
+                    # cause: narrowing here is purely pier-membership, so a total
+                    # loss is just as likely to mean garbage/unresolvable ids.
+                    logger.warning(
+                        "Tag steering anchors: ALL %d supplied anchor id(s) were lost "
+                        "before reaching the pipeline -- none are among the piers being "
+                        "passed, gap insertion cannot act: %s",
+                        len(_dropped_tag_anchor_ids),
+                        sorted(_dropped_tag_anchor_ids),
+                    )
+                else:
+                    logger.info(
+                        "Tag steering anchors: %d id(s) no longer among the piers being passed "
+                        "to the pipeline (most often blacklist exclusion) -- dropping from "
+                        "tag_anchor_track_ids before handoff: %s",
+                        len(_dropped_tag_anchor_ids),
+                        sorted(_dropped_tag_anchor_ids),
+                    )
+
         audit_context_extra_effective: Optional[Dict[str, Any]] = None
         if audit_context_extra is not None:
             audit_context_extra_effective = dict(audit_context_extra)
@@ -935,6 +988,7 @@ class PlaylistGenerator:
             internal_connector_ids=internal_connector_ids,
             internal_connector_max_per_segment=internal_connector_max_per_segment,
             internal_connector_priority=internal_connector_priority,
+            tag_anchor_track_ids=tag_anchor_track_ids,
         )
 
         tracks: List[Dict[str, Any]] = []
@@ -2206,6 +2260,7 @@ class PlaylistGenerator:
                 # piers so a sonically-peripheral clique is GUARANTEED to appear (bridges alone
                 # can't place them — see the bridge-side Phase A result). Selection is bridgeable
                 # + tag-central + diverse; gated on steering; capped so interiors aren't starved.
+                _tag_anchor_ids: Optional[Set[str]] = None
                 _anchor_max = int((ds_cfg.get("pier_bridge", {}) or {}).get("tag_steering_anchor_max", 3))
                 if steering_target is not None and _on_tag_track_ids and _anchor_max > 0:
                     from src.playlist.tag_steering import select_on_tag_anchors
@@ -2232,6 +2287,14 @@ class PlaylistGenerator:
                             len(_anchors), len({str(bundle.track_artists[a]) for a in _anchors}),
                             [str(bundle.track_ids[a]) for a in _anchors],
                         )
+                        # Hand the anchors' identity to the builder so it places them
+                        # in gaps rather than re-ordering them as co-equal piers.
+                        # Read back from ordered_medoids, NOT from _anchors: the
+                        # `[:_cap]` truncation above can drop the tail.
+                        _capped = set(int(m) for m in ordered_medoids)
+                        _tag_anchor_ids = {
+                            str(bundle.track_ids[a]) for a in _anchors if int(a) in _capped
+                        }
                     else:
                         logger.info(
                             "Tag steering on-tag anchors: 0 bridgeable on-tag tracks (min_bridge=%.2f) — "
@@ -2470,6 +2533,7 @@ class PlaylistGenerator:
                     pool_source=pool_source,
                     dry_run=bool(dry_run),
                     audit_context_extra={"style_summary": style_summary},
+                    tag_anchor_track_ids=_tag_anchor_ids,
                 )
             except ValueError as e:
                 error_msg = str(e)
@@ -2510,6 +2574,7 @@ class PlaylistGenerator:
                             pool_source=pool_source,
                             dry_run=bool(dry_run),
                             audit_context_extra={"style_summary": style_summary},
+                            tag_anchor_track_ids=_tag_anchor_ids,
                         )
                         fallback_used = True
                         logger.warning(
