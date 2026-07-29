@@ -13,11 +13,13 @@ import pytest
 
 from src.playlist.multi_artist import (
     ArtistGroup,
+    allocate_pier_budget,
     group_genre_profiles,
     group_prototypes,
     multi_artist_config_from_ds,
     overlap_affinity,
     partition_artist_groups,
+    total_pier_budget,
 )
 
 
@@ -306,3 +308,62 @@ def test_affinity_ranking_flips_without_global_mean_centering():
         "centering must surface the genuinely B-like candidate, not the one "
         "merely close to the library's generic direction"
     )
+
+
+def test_single_group_budget_matches_todays_formula():
+    """One group must reproduce max(3, round(track_count * fraction)) exactly."""
+    for tracks, frac in [(30, 0.125), (12, 0.125), (50, 0.2), (20, 0.05)]:
+        assert total_pier_budget(tracks, frac, 1) == max(3, round(tracks * frac))
+
+
+def test_two_groups_double_the_budget_within_the_segment_floor():
+    # 30 tracks, 0.125 -> base 4; two groups -> 8; floor = 30 // 3 = 10
+    assert total_pier_budget(30, 0.125, 2) == 8
+    # 15 tracks, 0.125 -> base 3; two groups -> 6; floor = 5 -> clamped to 5
+    assert total_pier_budget(15, 0.125, 2) == 5
+
+
+def test_budget_never_drops_below_one_per_group():
+    assert total_pier_budget(6, 0.125, 4) >= 4
+
+
+def test_allocation_is_even_with_remainder_to_the_first_chip():
+    groups = [
+        ArtistGroup("A", [0, 1, 2, 3, 4, 5]),
+        ArtistGroup("B", [6, 7, 8, 9, 10, 11]),
+    ]
+    alloc = allocate_pier_budget(groups, 7, joint_pier_min_budget=3)
+    assert alloc == {"A": 4, "B": 3}
+
+
+def test_joint_group_claims_one_seat_when_budget_allows():
+    groups = [
+        ArtistGroup("A", [0, 1, 2]),
+        ArtistGroup("B", [3, 4, 5]),
+        ArtistGroup("A & B", [6, 7], is_joint=True, source_artists=("A", "B")),
+    ]
+    alloc = allocate_pier_budget(groups, 5, joint_pier_min_budget=3)
+    assert alloc["A & B"] == 1
+    assert alloc["A"] + alloc["B"] == 4
+    assert sum(alloc.values()) == 5
+
+
+def test_joint_group_gets_no_seat_below_the_min_budget():
+    groups = [
+        ArtistGroup("A", [0, 1]),
+        ArtistGroup("B", [2, 3]),
+        ArtistGroup("A & B", [4], is_joint=True, source_artists=("A", "B")),
+    ]
+    alloc = allocate_pier_budget(groups, 2, joint_pier_min_budget=3)
+    assert alloc.get("A & B", 0) == 0
+    assert sum(alloc.values()) == 2
+
+
+def test_a_thin_group_cannot_be_allocated_more_piers_than_it_has_tracks():
+    groups = [
+        ArtistGroup("A", list(range(20))),
+        ArtistGroup("B", [20]),  # one track
+    ]
+    alloc = allocate_pier_budget(groups, 8, joint_pier_min_budget=3)
+    assert alloc["B"] == 1, "cannot seat more piers than the group has tracks"
+    assert alloc["A"] == 7, "the surplus reallocates to the group that can use it"

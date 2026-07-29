@@ -277,3 +277,82 @@ def overlap_affinity(
 
     out[members] = combined
     return out
+
+
+def total_pier_budget(
+    track_count: int, max_artist_fraction: float, n_groups: int
+) -> int:
+    """Total piers across all groups.
+
+    ``max_artist_fraction`` (the Artist-presence dial) is EACH seed artist's share,
+    so N groups get N times the single-artist base -- clamped by a floor that keeps
+    bridge segments long enough to be bridgeable, and never below one per group.
+    """
+    base = max(3, round(int(track_count) * float(max_artist_fraction)))
+    n = max(1, int(n_groups))
+    if n == 1:
+        return base
+    segment_floor = max(n, int(track_count) // 3)
+    return max(n, min(n * base, segment_floor))
+
+
+def allocate_pier_budget(
+    groups: Sequence[ArtistGroup], total: int, *, joint_pier_min_budget: int
+) -> Dict[str, int]:
+    """Split ``total`` piers across groups: even, remainder to the first chip.
+
+    The joint group claims exactly one seat when it is non-empty and the total
+    reaches ``joint_pier_min_budget``. No group is allocated more piers than it
+    has tracks; the surplus reallocates to groups that can still use it.
+    """
+    total = max(0, int(total))
+    if not groups or total == 0:
+        return {}
+
+    alloc: Dict[str, int] = {g.label: 0 for g in groups}
+    remaining = total
+
+    joint = next((g for g in groups if g.is_joint), None)
+    if joint is not None and joint.indices and total >= int(joint_pier_min_budget):
+        alloc[joint.label] = 1
+        remaining -= 1
+        logger.info(
+            "Multi-artist: reserved 1 pier for the jointly-credited group '%s'",
+            joint.label,
+        )
+
+    exclusive = [g for g in groups if not g.is_joint and g.indices]
+    if not exclusive:
+        # Everything to the joint group, capped by its track count.
+        if joint is not None and joint.indices:
+            alloc[joint.label] = min(total, len(joint.indices))
+        return {k: v for k, v in alloc.items() if v > 0}
+
+    # Even split, remainder to the first chip.
+    per, rem = divmod(remaining, len(exclusive))
+    for i, g in enumerate(exclusive):
+        alloc[g.label] += per + (1 if i < rem else 0)
+
+    # Cap by available tracks, then redistribute the surplus.
+    capacity = {g.label: len(g.indices) for g in groups}
+    surplus = 0
+    for label, want in list(alloc.items()):
+        cap = capacity.get(label, 0)
+        if want > cap:
+            surplus += want - cap
+            alloc[label] = cap
+            logger.warning(
+                "Multi-artist: '%s' has only %d track(s) — allocated %d pier(s) "
+                "instead of %d.", label, cap, cap, want,
+            )
+    while surplus > 0:
+        takers = [g.label for g in exclusive if alloc[g.label] < capacity[g.label]]
+        if not takers:
+            break
+        for label in takers:
+            if surplus == 0:
+                break
+            alloc[label] += 1
+            surplus -= 1
+
+    return {k: v for k, v in alloc.items() if v > 0}
