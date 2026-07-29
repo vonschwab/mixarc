@@ -67,7 +67,6 @@ def test_partition_splits_exclusive_and_joint():
     ])
     groups, dropped = partition_artist_groups(b, ["Brian Eno", "Harold Budd"])
     assert dropped == []
-    assert all(isinstance(g, ArtistGroup) for g in groups)
     by_label = {g.label: g for g in groups}
     assert sorted(by_label["Brian Eno"].indices) == [0, 1]
     assert sorted(by_label["Harold Budd"].indices) == [2]
@@ -107,3 +106,85 @@ def test_excluded_track_ids_are_removed_before_grouping():
     )
     by_label = {g.label: g for g in groups}
     assert by_label["Brian Eno"].indices == [1]
+
+
+def test_joint_only_artist_is_not_dropped_and_keeps_joint_provenance():
+    """Regression for review finding 1: an artist credited only jointly with
+    the other chip (never solo) must not be reported dropped, and must still
+    show up in the joint group's label/source_artists -- e.g. the real
+    library's "John Foxx and Harold Budd" alongside thin solo catalogs."""
+    b = _bundle([
+        "Alice and Bob", "Alice and Bob",   # 0,1 -> joint only, Alice has no solo rows
+        "Bob",                               # 2   -> Bob exclusive
+    ])
+    groups, dropped = partition_artist_groups(b, ["Alice", "Bob"])
+    assert dropped == []
+    joint = next(g for g in groups if g.is_joint)
+    assert joint == ArtistGroup(
+        label="Alice & Bob",
+        indices=[0, 1],
+        is_joint=True,
+        source_artists=("Alice", "Bob"),
+    )
+    exclusive = [g for g in groups if not g.is_joint]
+    assert [g.label for g in exclusive] == ["Bob"]
+    assert exclusive[0].indices == [2]
+
+
+def test_duplicate_chip_names_are_deduped():
+    """Regression for review finding 2: a repeated chip name must not produce
+    two identical exclusive groups (it would double that artist's downstream
+    pier budget)."""
+    b = _bundle(["Brian Eno", "Brian Eno", "Harold Budd"])
+    groups, dropped = partition_artist_groups(
+        b, ["Brian Eno", "Brian Eno", "Harold Budd"]
+    )
+    assert dropped == []
+    labels = [g.label for g in groups]
+    assert labels.count("Brian Eno") == 1
+    by_label = {g.label: g for g in groups}
+    assert sorted(by_label["Brian Eno"].indices) == [0, 1]
+    assert by_label["Harold Budd"].indices == [2]
+
+
+def test_third_party_collaboration_excluded_by_default():
+    """Regression for review finding 3: the include_collaborations=False path
+    (previously uncovered) must strip a THIRD-party collaboration out of every
+    group, while the two-chip joint track still lands in the joint group."""
+    b = _bundle([
+        "Brian Eno",                        # 0 -> Eno exclusive
+        "Harold Budd",                      # 1 -> Budd exclusive
+        "Harold Budd and Brian Eno",        # 2 -> joint (both chips)
+        "Brian Eno & John Cale",            # 3 -> third-party collab, not a chip
+    ])
+    groups, dropped = partition_artist_groups(b, ["Brian Eno", "Harold Budd"])
+    assert dropped == []
+    assert all(3 not in g.indices for g in groups)
+    joint = next(g for g in groups if g.is_joint)
+    assert joint.indices == [2]
+    by_label = {g.label: g for g in groups if not g.is_joint}
+    assert by_label["Brian Eno"].indices == [0]
+    assert by_label["Harold Budd"].indices == [1]
+
+
+def test_third_party_collaboration_absorbed_when_include_collaborations():
+    """include_collaborations=True must fold the third-party collab into that
+    artist's exclusive group, while the two-chip joint track stays
+    joint-only -- never duplicated into an exclusive group."""
+    b = _bundle([
+        "Brian Eno",                        # 0 -> Eno exclusive
+        "Harold Budd",                      # 1 -> Budd exclusive
+        "Harold Budd and Brian Eno",        # 2 -> joint (both chips)
+        "Brian Eno & John Cale",            # 3 -> third-party collab, not a chip
+    ])
+    groups, dropped = partition_artist_groups(
+        b, ["Brian Eno", "Harold Budd"], include_collaborations=True
+    )
+    assert dropped == []
+    by_label = {g.label: g for g in groups if not g.is_joint}
+    assert sorted(by_label["Brian Eno"].indices) == [0, 3]
+    assert by_label["Harold Budd"].indices == [1]
+    joint = next(g for g in groups if g.is_joint)
+    assert joint.indices == [2]
+    # the joint track is not duplicated into any exclusive group
+    assert all(2 not in g.indices for g in groups if not g.is_joint)

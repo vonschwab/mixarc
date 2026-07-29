@@ -80,7 +80,11 @@ def partition_artist_groups(
     from src.playlist.artist_style import _artist_indices_in_bundle
     from src.playlist.history_analyzer import is_collaboration_of
 
-    names = [str(a).strip() for a in artist_names if str(a).strip()]
+    # A duplicate chip is user input, not an error -- dedupe silently, order
+    # preserved, so a repeated name never produces two identical groups.
+    names = list(
+        dict.fromkeys(str(a).strip() for a in artist_names if str(a).strip())
+    )
     excluded = {str(t) for t in (excluded_track_ids or set())}
 
     # Rows matching each named artist, including cross-chip collaborations
@@ -98,11 +102,17 @@ def partition_artist_groups(
         for i in idx:
             claim_count[i] = claim_count.get(i, 0) + 1
     joint_indices = sorted(i for i, n in claim_count.items() if n >= 2)
+    joint_set = set(joint_indices)
+
+    # Names that actually claimed a joint-credited row -- this is the joint
+    # group's real provenance, independent of whether that name also ends up
+    # with a surviving exclusive group (an artist can be joint-only).
+    joint_contributors = [name for name in names if raw[name] & joint_set]
 
     groups: List[ArtistGroup] = []
     dropped: List[str] = []
     for name in names:
-        exclusive = sorted(raw[name] - set(joint_indices))
+        exclusive = sorted(raw[name] - joint_set)
         if not include_collaborations:
             # Drop third-party collaborations the caller did not ask for. A row
             # whose raw credit is a collaboration but which is not joint with
@@ -115,26 +125,29 @@ def partition_artist_groups(
                 )
             ]
         if not exclusive:
-            dropped.append(name)
-            logger.warning(
-                "Multi-artist: '%s' has no usable tracks in the library — "
-                "dropped from the pairing.", name,
-            )
+            # Only a name that claimed no rows at all (not even jointly) is
+            # genuinely absent from the pairing -- a joint-only artist IS
+            # represented, via the joint group.
+            if name not in joint_contributors:
+                dropped.append(name)
+                logger.warning(
+                    "Multi-artist: '%s' has no usable tracks in the library — "
+                    "dropped from the pairing.", name,
+                )
             continue
         groups.append(ArtistGroup(label=name, indices=exclusive, is_joint=False))
 
     if joint_indices:
-        kept = [g.label for g in groups]
         groups.append(
             ArtistGroup(
-                label=" & ".join(kept) if kept else "joint",
+                label=" & ".join(joint_contributors) if joint_contributors else "joint",
                 indices=joint_indices,
                 is_joint=True,
-                source_artists=tuple(kept),
+                source_artists=tuple(joint_contributors),
             )
         )
         logger.info(
             "Multi-artist: %d jointly-credited track(s) across %s",
-            len(joint_indices), kept,
+            len(joint_indices), joint_contributors,
         )
     return groups, dropped
