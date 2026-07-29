@@ -267,3 +267,42 @@ def test_genre_share_renormalizes_to_pure_sonic_without_dense_genre(caplog):
         "a genre term that cannot act must WARN, never silently no-op"
     pure = overlap_affinity(b, group_a, groups, protos, {}, genre_share=0.0)
     assert np.allclose(aff, pure), "must renormalize to pure sonic, not scale down"
+
+
+def test_affinity_ranking_flips_without_global_mean_centering():
+    """Regression: none of the four tests above can detect a dropped or broken
+    sonic_global_mean centering -- monkeypatching it to return an all-zero
+    vector left all four passing (see task-4-report.md). This fixture is built
+    so the RAW (uncentered) cosine and the CENTERED cosine disagree about which
+    of group A's two candidates is closer to group B:
+
+    - a library dominated by filler rows pointing along [1, 0] pulls the global
+      mean toward [1, 0];
+    - A's 'generic' candidate sits close to that generic direction;
+    - A's 'specific' candidate sits close to the orthogonal, genuinely-B-like
+      direction;
+    - B's own rows lean toward the generic direction too, so B's RAW prototype
+      favors the generic candidate -- but once the generic direction is
+      subtracted, B's centered prototype favors the specific candidate instead.
+
+    Only the intended (centered) behavior is asserted here. The monkeypatch-to-
+    zero check that proves this fixture actually discriminates is a one-off
+    verification run manually, not shipped test code -- see task-4-report.md.
+    """
+    filler = [[1.0, 0.0]] * 12
+    a_generic = [0.9848, 0.1736]
+    a_specific = [0.0872, 0.9962]
+    b_rows = [[0.9659, 0.2588], [0.9659, 0.2588]]
+    b = _sonic_bundle(
+        ["Filler"] * 12 + ["A", "A", "B", "B"],
+        filler + [a_generic, a_specific] + b_rows,
+    )
+    groups, _ = partition_artist_groups(b, ["A", "B"])
+    protos = group_prototypes(b, groups)
+    group_a = next(g for g in groups if g.label == "A")
+    idx_generic, idx_specific = group_a.indices
+    aff = overlap_affinity(b, group_a, groups, protos, {}, genre_share=0.0)
+    assert aff[idx_specific] > aff[idx_generic], (
+        "centering must surface the genuinely B-like candidate, not the one "
+        "merely close to the library's generic direction"
+    )
