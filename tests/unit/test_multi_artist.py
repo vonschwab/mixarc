@@ -6,10 +6,9 @@ tests/integration/test_multi_artist_generation.py.
 """
 from __future__ import annotations
 
-import numpy as np
 import pytest
 
-from src.playlist.multi_artist import MultiArtistConfig, multi_artist_config_from_ds
+from src.playlist.multi_artist import multi_artist_config_from_ds
 
 
 def test_config_defaults_are_live():

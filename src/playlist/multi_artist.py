@@ -16,9 +16,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence
-
-import numpy as np
+from typing import Any, Dict
 
 logger = logging.getLogger(__name__)
 
