@@ -301,15 +301,25 @@ def allocate_pier_budget(
 ) -> Dict[str, int]:
     """Split ``total`` piers across groups: even, remainder to the first chip.
 
-    The joint group claims exactly one seat when it is non-empty and the total
-    reaches ``joint_pier_min_budget``. No group is allocated more piers than it
-    has tracks; the surplus reallocates to groups that can still use it.
+    The joint group claims a GUARANTEED MINIMUM of one seat when it is
+    non-empty and the total reaches ``joint_pier_min_budget``. It may
+    additionally absorb surplus during redistribution once the exclusive
+    groups are saturated, subject to its own track capacity like any other
+    group -- the joint group IS the overlap between the named artists, so for
+    a pairing whose collaborative output dominates thin solo catalogs, it is
+    the correct place for spare budget to land, not a one-seat ceiling.
+
+    No group is ever allocated more piers than it has tracks. A shortfall
+    against ``total`` after full redistribution reflects a genuine capacity
+    limit (``total`` exceeds every group's tracks combined) -- it is always
+    logged, never silently swallowed.
     """
     total = max(0, int(total))
     if not groups or total == 0:
         return {}
 
     alloc: Dict[str, int] = {g.label: 0 for g in groups}
+    capacity: Dict[str, int] = {g.label: len(g.indices) for g in groups}
     remaining = total
 
     joint = next((g for g in groups if g.is_joint), None)
@@ -322,19 +332,17 @@ def allocate_pier_budget(
         )
 
     exclusive = [g for g in groups if not g.is_joint and g.indices]
-    if not exclusive:
-        # Everything to the joint group, capped by its track count.
-        if joint is not None and joint.indices:
-            alloc[joint.label] = min(total, len(joint.indices))
-        return {k: v for k, v in alloc.items() if v > 0}
-
-    # Even split, remainder to the first chip.
-    per, rem = divmod(remaining, len(exclusive))
-    for i, g in enumerate(exclusive):
-        alloc[g.label] += per + (1 if i < rem else 0)
+    if exclusive:
+        # Even split, remainder to the first chip.
+        per, rem = divmod(remaining, len(exclusive))
+        for i, g in enumerate(exclusive):
+            alloc[g.label] += per + (1 if i < rem else 0)
+    elif joint is not None and joint.indices:
+        # No exclusive groups at all: the rest of the budget goes to the
+        # joint group (capped below like everyone else).
+        alloc[joint.label] += remaining
 
     # Cap by available tracks, then redistribute the surplus.
-    capacity = {g.label: len(g.indices) for g in groups}
     surplus = 0
     for label, want in list(alloc.items()):
         cap = capacity.get(label, 0)
@@ -345,8 +353,12 @@ def allocate_pier_budget(
                 "Multi-artist: '%s' has only %d track(s) — allocated %d pier(s) "
                 "instead of %d.", label, cap, cap, want,
             )
+
+    # Surplus redistributes to ANY group with headroom, including the joint
+    # group beyond its guaranteed seat -- see the docstring rationale.
+    seatable = [g for g in groups if g.indices]
     while surplus > 0:
-        takers = [g.label for g in exclusive if alloc[g.label] < capacity[g.label]]
+        takers = [g.label for g in seatable if alloc[g.label] < capacity[g.label]]
         if not takers:
             break
         for label in takers:
@@ -354,5 +366,14 @@ def allocate_pier_budget(
                 break
             alloc[label] += 1
             surplus -= 1
+
+    delivered = sum(alloc.values())
+    if delivered < total:
+        caps_desc = ", ".join(f"{g.label}={capacity[g.label]}" for g in groups)
+        logger.warning(
+            "Multi-artist: requested %d pier(s) but only %d could be seated "
+            "(shortfall %d) — group track capacities: %s.",
+            total, delivered, total - delivered, caps_desc,
+        )
 
     return {k: v for k, v in alloc.items() if v > 0}

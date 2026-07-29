@@ -367,3 +367,53 @@ def test_a_thin_group_cannot_be_allocated_more_piers_than_it_has_tracks():
     alloc = allocate_pier_budget(groups, 8, joint_pier_min_budget=3)
     assert alloc["B"] == 1, "cannot seat more piers than the group has tracks"
     assert alloc["A"] == 7, "the surplus reallocates to the group that can use it"
+
+
+def test_joint_group_absorbs_surplus_when_exclusive_groups_are_saturated():
+    """Regression for review finding: a dominant joint catalog (e.g. a real
+    duo credited on far more tracks than either artist's thin solo work) must
+    not be capped at its guaranteed one seat while surplus is silently
+    dropped. Once A and B are saturated at their track counts, the remaining
+    budget must flow to the joint group, up to its own capacity."""
+    groups = [
+        ArtistGroup("A", [0, 1]),
+        ArtistGroup("B", [2, 3]),
+        ArtistGroup("A & B", list(range(4, 24)), is_joint=True,
+                    source_artists=("A", "B")),  # 20 tracks
+    ]
+    alloc = allocate_pier_budget(groups, 10, joint_pier_min_budget=3)
+    assert alloc == {"A": 2, "B": 2, "A & B": 6}
+    assert sum(alloc.values()) == 10, "all 10 requested piers must be seated"
+
+
+def test_shortfall_against_total_capacity_is_seated_fully_and_warned(caplog):
+    """When the request genuinely exceeds every group's combined track count,
+    the allocation must saturate every group (never drop a seatable pier) and
+    the shortfall must be logged, never inferred from a short playlist."""
+    groups = [
+        ArtistGroup("A", [0, 1]),
+        ArtistGroup("B", [2, 3]),
+        ArtistGroup("A & B", [4, 5, 6], is_joint=True, source_artists=("A", "B")),
+    ]
+    with caplog.at_level("WARNING"):
+        alloc = allocate_pier_budget(groups, 10, joint_pier_min_budget=3)
+    assert alloc == {"A": 2, "B": 2, "A & B": 3}, "every group saturates at capacity"
+    assert sum(alloc.values()) == 7, "7 is the true combined capacity"
+    assert any("shortfall" in r.message for r in caplog.records), (
+        "an unsatisfiable total must warn, never silently under-deliver"
+    )
+
+
+def test_joint_group_guaranteed_seat_survives_when_no_surplus_is_needed():
+    """Confirms the guaranteed-one-seat behavior (Part A's floor, unchanged)
+    still holds in the ordinary case where the exclusive groups can absorb
+    the rest without any redistribution."""
+    groups = [
+        ArtistGroup("A", [0, 1, 2, 3]),
+        ArtistGroup("B", [4, 5, 6, 7]),
+        ArtistGroup("A & B", [8, 9], is_joint=True, source_artists=("A", "B")),
+    ]
+    alloc = allocate_pier_budget(groups, 6, joint_pier_min_budget=3)
+    assert alloc["A & B"] == 1
+    assert alloc["A"] + alloc["B"] == 5
+    assert sum(alloc.values()) == 6
