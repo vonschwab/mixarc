@@ -417,3 +417,46 @@ def test_joint_group_guaranteed_seat_survives_when_no_surplus_is_needed():
     assert alloc["A & B"] == 1
     assert alloc["A"] + alloc["B"] == 5
     assert sum(alloc.values()) == 6
+
+
+from src.playlist.multi_artist import order_with_alternation
+
+
+def test_alternation_prefers_the_interleaved_walk_when_sonic_cost_is_equal():
+    """Four piers on a symmetric square: A0 A1 B0 B1. Several greedy walks have
+    identical sonic cost; the alternating one must win."""
+    X = np.zeros((4, 2))
+    X[0] = [1.0, 0.0]     # A0
+    X[1] = [0.0, 1.0]     # A1
+    X[2] = [-1.0, 0.0]    # B0
+    X[3] = [0.0, -1.0]    # B1
+    X = X / np.linalg.norm(X, axis=1, keepdims=True)
+    group_of = {0: "A", 1: "A", 2: "B", 3: "B"}
+    ordered, improved = order_with_alternation(
+        [0, 1, 2, 3], X, group_of, alternation_bonus=0.15
+    )
+    labels = [group_of[i] for i in ordered]
+    changes = sum(1 for a, b in zip(labels, labels[1:]) if a != b)
+    assert changes >= 2, f"expected an interleaved order, got {labels}"
+    assert set(ordered) == {0, 1, 2, 3}, "ordering must be a permutation"
+
+
+def test_alternation_bonus_zero_reproduces_order_clusters():
+    from src.playlist.artist_style import order_clusters
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(6, 4))
+    X = X / np.linalg.norm(X, axis=1, keepdims=True)
+    group_of = {0: "A", 1: "A", 2: "A", 3: "B", 4: "B", 5: "B"}
+    ordered, improved = order_with_alternation(
+        [0, 1, 2, 3, 4, 5], X, group_of, alternation_bonus=0.0
+    )
+    assert ordered == order_clusters([0, 1, 2, 3, 4, 5], X)
+    assert improved is False
+
+
+def test_ordering_is_a_permutation_and_handles_degenerate_input():
+    X = np.eye(3)
+    group_of = {0: "A", 1: "B", 2: "A"}
+    assert order_with_alternation([], X, group_of, alternation_bonus=0.15) == ([], False)
+    single, improved = order_with_alternation([1], X, group_of, alternation_bonus=0.15)
+    assert single == [1] and improved is False

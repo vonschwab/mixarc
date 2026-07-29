@@ -377,3 +377,73 @@ def allocate_pier_budget(
         )
 
     return {k: v for k, v in alloc.items() if v > 0}
+
+
+def _path_sonic_cost(order: Sequence[int], X_norm: np.ndarray) -> float:
+    """Sum of consecutive cosine similarities. Higher is a smoother walk."""
+    if len(order) < 2:
+        return 0.0
+    return float(
+        sum(np.dot(X_norm[a], X_norm[b]) for a, b in zip(order, order[1:]))
+    )
+
+
+def _alternation_count(order: Sequence[int], group_of: Dict[int, str]) -> int:
+    if len(order) < 2:
+        return 0
+    labels = [group_of.get(int(i), "") for i in order]
+    return sum(1 for a, b in zip(labels, labels[1:]) if a != b)
+
+
+def order_with_alternation(
+    medoids: Sequence[int],
+    X_norm: np.ndarray,
+    group_of_index: Dict[int, str],
+    *,
+    alternation_bonus: float,
+) -> tuple[List[int], bool]:
+    """Order piers preferring artist alternation, without inventing a topology.
+
+    Mirrors artist_style.reorder_avoiding_low_support_terminal: every candidate is
+    an order ``order_clusters`` itself could produce (same greedy walk, different
+    start node). Scored by sonic path cost PLUS ``alternation_bonus`` per artist
+    change, so alternation only wins where it is sonically affordable.
+
+    Returns ``(ordered, improved)``; ``improved`` is True when the winner differs
+    from the default ``order_clusters`` walk.
+    """
+    from src.playlist.artist_style import order_clusters
+
+    idx = [int(m) for m in medoids]
+    if len(idx) < 2:
+        return list(idx), False
+
+    default = order_clusters(idx, X_norm)
+    bonus = float(alternation_bonus)
+    if bonus <= 0.0:
+        return default, False
+
+    def score(order: Sequence[int]) -> float:
+        return _path_sonic_cost(order, X_norm) + bonus * _alternation_count(
+            order, group_of_index
+        )
+
+    best = default
+    best_score = score(default)
+    for start in idx:
+        cand = order_clusters(idx, X_norm, start=start)
+        s = score(cand)
+        if s > best_score + 1e-12:
+            best, best_score = cand, s
+
+    improved = best != default
+    if improved:
+        logger.info(
+            "Multi-artist ordering: alternation preference changed the pier walk "
+            "(%d -> %d artist changes, sonic cost %.4f -> %.4f)",
+            _alternation_count(default, group_of_index),
+            _alternation_count(best, group_of_index),
+            _path_sonic_cost(default, X_norm),
+            _path_sonic_cost(best, X_norm),
+        )
+    return best, improved
