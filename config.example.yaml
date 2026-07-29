@@ -252,6 +252,21 @@ playlists:
       # already produce, never a new topology, never fails.
       pier_support_terminal_avoidance: true
 
+    # ─────────────────────────────────────────────────────────────────────
+    # Multi-artist blend (spec 2026-07-29-multi-artist-blend-design.md)
+    # Two or more artist chips -> every pier drawn from the region the named
+    # artists share. Inert with a single artist. Soft bias only.
+    # ─────────────────────────────────────────────────────────────────────
+    multi_artist:
+      enabled: true
+      overlap_weight: 0.6          # strength of the pull toward the other artist(s).
+                                   # 0.0 = explicit rollback (piers stay characteristic).
+      genre_share: 0.25            # split within the affinity term; the rest is MuQ.
+      max_artists: 4
+      joint_pier_min_budget: 3     # min total piers before a jointly-credited seat is reserved
+      alternation_bonus: 0.15      # ordering preference for A/B/A/B; never overrides sonic cost
+      low_overlap_threshold: 0.15  # mean pier affinity below this -> report it to the user
+
     # Construction scoring weights
     # score = alpha*seed_sim + beta*transition_sim + gamma*diversity - penalty
     scoring:
