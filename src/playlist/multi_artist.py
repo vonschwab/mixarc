@@ -18,6 +18,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence
 
+import numpy as np
+
 logger = logging.getLogger(__name__)
 
 
@@ -151,3 +153,127 @@ def partition_artist_groups(
             len(joint_indices), joint_contributors,
         )
     return groups, dropped
+
+
+def group_prototypes(bundle, groups: Sequence[ArtistGroup]) -> Dict[str, np.ndarray]:
+    """label -> centered, L2-normalized MuQ prototype for that group.
+
+    Reuses tag_steering.sonic_prototype_from_rows: its global-mean centering
+    removes the generic-sonic direction, which is what makes "closest to the
+    OTHER artist" mean something rather than "closest to average music".
+
+    An exclusive group's prototype is built from its own rows PLUS the joint
+    rows -- jointly-credited work is part of both artists' identity.
+    """
+    from src.playlist.tag_steering import sonic_global_mean, sonic_prototype_from_rows
+
+    X = getattr(bundle, "X_sonic", None)
+    if X is None:
+        raise ValueError("Artifact missing X_sonic — cannot build artist prototypes.")
+    X = np.asarray(X, dtype=float)
+    gmean = sonic_global_mean(X)
+
+    joint_rows: List[int] = []
+    for g in groups:
+        if g.is_joint:
+            joint_rows.extend(g.indices)
+
+    protos: Dict[str, np.ndarray] = {}
+    for g in groups:
+        rows = list(g.indices) if g.is_joint else list(g.indices) + joint_rows
+        proto, cohesion, n = sonic_prototype_from_rows(X, rows, global_mean=gmean)
+        if proto is None:
+            logger.warning(
+                "Multi-artist: degenerate sonic prototype for '%s' (n=%d) — "
+                "this group contributes no pull.", g.label, n,
+            )
+            continue
+        protos[g.label] = proto
+        logger.info(
+            "Multi-artist prototype: %s n=%d cohesion=%.3f", g.label, n, cohesion,
+        )
+    return protos
+
+
+def group_genre_profiles(bundle, groups: Sequence[ArtistGroup]) -> Dict[str, np.ndarray]:
+    """label -> mean dense-genre row. Empty dict when X_genre_dense is absent."""
+    xgd = getattr(bundle, "X_genre_dense", None)
+    if xgd is None:
+        return {}
+    xgd = np.asarray(xgd, dtype=float)
+    profiles: Dict[str, np.ndarray] = {}
+    for g in groups:
+        if not g.indices:
+            continue
+        profiles[g.label] = xgd[list(g.indices)].mean(axis=0)
+    return profiles
+
+
+def overlap_affinity(
+    bundle,
+    group: ArtistGroup,
+    groups: Sequence[ArtistGroup],
+    protos: Dict[str, np.ndarray],
+    genre_profiles: Dict[str, np.ndarray],
+    *,
+    genre_share: float,
+) -> np.ndarray:
+    """Bundle-aligned (N,) pull of each of ``group``'s rows toward the OTHER groups.
+
+        affinity = (1 - genre_share) * cos(muq_centered, proto_others)
+                 +      genre_share  * genre_sim(dense_genre, profile_others)
+
+    Zero outside ``group``. Zero everywhere when there is no other group, or when
+    the other groups produced no prototype.
+    """
+    from src.playlist.candidate_pool import _compute_genre_similarity
+    from src.playlist.tag_steering import sonic_global_mean
+
+    X = np.asarray(getattr(bundle, "X_sonic"), dtype=float)
+    out = np.zeros(X.shape[0], dtype=float)
+    members = list(group.indices)
+    if not members:
+        return out
+
+    other_labels = [
+        g.label for g in groups if g.label != group.label and g.label in protos
+    ]
+    if not other_labels:
+        return out
+
+    others_proto = np.mean([protos[lbl] for lbl in other_labels], axis=0)
+    n = float(np.linalg.norm(others_proto))
+    if n <= 1e-12:
+        logger.warning(
+            "Multi-artist: the other artists' prototypes cancel out — "
+            "no sonic pull for '%s'.", group.label,
+        )
+        return out
+    others_proto = others_proto / n
+
+    gmean = sonic_global_mean(X)
+    Mn = X[members] / (np.linalg.norm(X[members], axis=1, keepdims=True) + 1e-12)
+    sonic_term = (Mn - gmean) @ others_proto
+
+    share = float(genre_share)
+    xgd = getattr(bundle, "X_genre_dense", None)
+    other_profiles = [genre_profiles[l] for l in other_labels if l in genre_profiles]
+    if share > 0.0 and (xgd is None or not other_profiles):
+        logger.warning(
+            "Multi-artist: genre_share=%.2f but X_genre_dense (or the other "
+            "artists' genre profile) is unavailable — renormalizing to pure-sonic "
+            "for this run.", share,
+        )
+        share = 0.0
+
+    if share > 0.0:
+        profile = np.mean(other_profiles, axis=0)
+        genre_term = _compute_genre_similarity(
+            profile, np.asarray(xgd, dtype=float)[members], method="cosine",
+        )
+        combined = (1.0 - share) * sonic_term + share * genre_term
+    else:
+        combined = sonic_term
+
+    out[members] = combined
+    return out

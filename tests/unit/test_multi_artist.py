@@ -8,11 +8,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass as _dc
 
+import numpy as np
 import pytest
 
 from src.playlist.multi_artist import (
     ArtistGroup,
+    group_genre_profiles,
+    group_prototypes,
     multi_artist_config_from_ds,
+    overlap_affinity,
     partition_artist_groups,
 )
 
@@ -188,3 +192,78 @@ def test_third_party_collaboration_absorbed_when_include_collaborations():
     assert joint.indices == [2]
     # the joint track is not duplicated into any exclusive group
     assert all(2 not in g.indices for g in groups if not g.is_joint)
+
+
+@_dc
+class _SonicBundle:
+    artist_keys: list
+    track_artists: list
+    track_ids: list
+    X_sonic: object
+    X_genre_dense: object = None
+
+
+def _sonic_bundle(artists, sonic, genre=None):
+    from src.string_utils import normalize_artist_key
+    return _SonicBundle(
+        artist_keys=[normalize_artist_key(a) for a in artists],
+        track_artists=list(artists),
+        track_ids=[f"t{i}" for i in range(len(artists))],
+        X_sonic=np.asarray(sonic, dtype=float),
+        X_genre_dense=None if genre is None else np.asarray(genre, dtype=float),
+    )
+
+
+def test_prototype_is_unit_norm_per_group():
+    b = _sonic_bundle(
+        ["A", "A", "B", "B"],
+        [[1.0, 0.0], [0.9, 0.1], [0.0, 1.0], [0.1, 0.9]],
+    )
+    groups, _ = partition_artist_groups(b, ["A", "B"])
+    protos = group_prototypes(b, groups)
+    assert set(protos) == {"A", "B"}
+    for p in protos.values():
+        assert np.linalg.norm(p) == pytest.approx(1.0, abs=1e-9)
+
+
+def test_affinity_ranks_the_track_nearest_the_other_artist_highest():
+    """A has two tracks: index 0 is far from B, index 1 leans toward B.
+    The affinity for group A must rank index 1 above index 0."""
+    b = _sonic_bundle(
+        ["A", "A", "B", "B"],
+        [[1.0, 0.0], [0.6, 0.8], [0.0, 1.0], [0.1, 1.0]],
+    )
+    groups, _ = partition_artist_groups(b, ["A", "B"])
+    protos = group_prototypes(b, groups)
+    group_a = next(g for g in groups if g.label == "A")
+    aff = overlap_affinity(b, group_a, groups, protos, {}, genre_share=0.0)
+    assert aff.shape == (4,)
+    assert aff[1] > aff[0], "the B-leaning track should score higher"
+    # rows outside the group are untouched
+    assert aff[2] == 0.0 and aff[3] == 0.0
+
+
+def test_affinity_is_zero_length_safe_for_an_empty_other_side():
+    b = _sonic_bundle(["A", "A"], [[1.0, 0.0], [0.0, 1.0]])
+    groups, _ = partition_artist_groups(b, ["A"])
+    protos = group_prototypes(b, groups)
+    aff = overlap_affinity(b, groups[0], groups, protos, {}, genre_share=0.0)
+    assert np.allclose(aff, 0.0), "no other artist -> no pull"
+
+
+def test_genre_share_renormalizes_to_pure_sonic_without_dense_genre(caplog):
+    b = _sonic_bundle(
+        ["A", "A", "B"],
+        [[1.0, 0.0], [0.6, 0.8], [0.0, 1.0]],
+    )  # X_genre_dense is None
+    groups, _ = partition_artist_groups(b, ["A", "B"])
+    protos = group_prototypes(b, groups)
+    profiles = group_genre_profiles(b, groups)
+    assert profiles == {}
+    group_a = next(g for g in groups if g.label == "A")
+    with caplog.at_level("WARNING"):
+        aff = overlap_affinity(b, group_a, groups, protos, profiles, genre_share=0.25)
+    assert any("X_genre_dense" in r.message for r in caplog.records), \
+        "a genre term that cannot act must WARN, never silently no-op"
+    pure = overlap_affinity(b, group_a, groups, protos, {}, genre_share=0.0)
+    assert np.allclose(aff, pure), "must renormalize to pure sonic, not scale down"
