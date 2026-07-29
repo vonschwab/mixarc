@@ -17,6 +17,7 @@ from src.playlist.multi_artist import (
     group_genre_profiles,
     group_prototypes,
     multi_artist_config_from_ds,
+    order_with_alternation,
     overlap_affinity,
     partition_artist_groups,
     total_pier_budget,
@@ -419,12 +420,11 @@ def test_joint_group_guaranteed_seat_survives_when_no_surplus_is_needed():
     assert sum(alloc.values()) == 6
 
 
-from src.playlist.multi_artist import order_with_alternation
-
-
 def test_alternation_prefers_the_interleaved_walk_when_sonic_cost_is_equal():
     """Four piers on a symmetric square: A0 A1 B0 B1. Several greedy walks have
-    identical sonic cost; the alternating one must win."""
+    identical sonic cost (every edge is a 90-degree turn, cosine 0); the
+    minimum-edge floor (review finding 1) does not exclude any of them here, so
+    the alternating one must win outright, including the ``improved`` flag."""
     X = np.zeros((4, 2))
     X[0] = [1.0, 0.0]     # A0
     X[1] = [0.0, 1.0]     # A1
@@ -439,6 +439,54 @@ def test_alternation_prefers_the_interleaved_walk_when_sonic_cost_is_equal():
     changes = sum(1 for a, b in zip(labels, labels[1:]) if a != b)
     assert changes >= 2, f"expected an interleaved order, got {labels}"
     assert set(ordered) == {0, 1, 2, 3}, "ordering must be a permutation"
+    assert improved is True, (
+        "the winner must differ from the default order_clusters walk here -- "
+        "all four candidate walks tie on sonic cost (every edge cosine is 0), "
+        "so the alternation bonus decides, and it must pick an interleaved one"
+    )
+
+
+def test_alternation_never_regresses_the_worst_edge():
+    """Seeded random-search regression for review finding 1: the alternation
+    bonus is a SUM-based score, and a sum can trade one wrecked edge for
+    several slightly better ones -- exactly what design principle 5 ("the
+    worst edge defines the experience") forbids. A pre-fix audit at the
+    shipped default alternation_bonus=0.15 found this happening in ~6% of 500
+    random trials (e.g. default min edge 0.084 -> winner min edge -0.102).
+    The min-edge floor in order_with_alternation must make this impossible:
+    the winner's worst edge must never be below the default walk's worst edge.
+    """
+    from src.playlist.artist_style import order_clusters
+
+    rng = np.random.default_rng(12345)
+    trials = 500
+    regressions = 0
+    for _ in range(trials):
+        n = int(rng.integers(4, 9))
+        dim = int(rng.integers(2, 6))
+        X = rng.normal(size=(n, dim))
+        X = X / np.linalg.norm(X, axis=1, keepdims=True)
+        idx = list(range(n))
+        labels = rng.choice(["A", "B"], size=n)
+        group_of = {i: str(labels[i]) for i in idx}
+
+        default = order_clusters(idx, X)
+        default_min = min(
+            float(np.dot(X[a], X[b])) for a, b in zip(default, default[1:])
+        )
+        ordered, _ = order_with_alternation(
+            idx, X, group_of, alternation_bonus=0.15
+        )
+        winner_min = min(
+            float(np.dot(X[a], X[b])) for a, b in zip(ordered, ordered[1:])
+        )
+        if winner_min < default_min - 1e-9:
+            regressions += 1
+
+    assert regressions == 0, (
+        f"{regressions}/{trials} seeded trials regressed the worst edge below "
+        "the default walk's floor -- the min-edge floor is not being applied"
+    )
 
 
 def test_alternation_bonus_zero_reproduces_order_clusters():

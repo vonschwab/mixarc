@@ -395,6 +395,17 @@ def _alternation_count(order: Sequence[int], group_of: Dict[int, str]) -> int:
     return sum(1 for a, b in zip(labels, labels[1:]) if a != b)
 
 
+def _min_edge(order: Sequence[int], X_norm: np.ndarray) -> float:
+    """Minimum consecutive cosine similarity along the walk -- its worst edge.
+
+    ``float("inf")`` for a path with no edges (fewer than 2 stops), so it never
+    fails a "no worse than" comparison by construction.
+    """
+    if len(order) < 2:
+        return float("inf")
+    return float(min(np.dot(X_norm[a], X_norm[b]) for a, b in zip(order, order[1:])))
+
+
 def order_with_alternation(
     medoids: Sequence[int],
     X_norm: np.ndarray,
@@ -402,12 +413,26 @@ def order_with_alternation(
     *,
     alternation_bonus: float,
 ) -> tuple[List[int], bool]:
-    """Order piers preferring artist alternation, without inventing a topology.
+    """Order piers preferring artist alternation, never worse than the default
+    walk's worst edge.
 
     Mirrors artist_style.reorder_avoiding_low_support_terminal: every candidate is
     an order ``order_clusters`` itself could produce (same greedy walk, different
-    start node). Scored by sonic path cost PLUS ``alternation_bonus`` per artist
-    change, so alternation only wins where it is sonically affordable.
+    start node). That bounds WHICH topologies are eligible, but NOT which one
+    wins -- a plain sum-of-cosines score can trade one wrecked edge for several
+    slightly better ones, which design principle 5 ("the worst edge defines the
+    experience") forbids.
+
+    The guarantee is enforced with a minimum-edge floor, not just topology
+    membership: ``default_min`` is the worst (minimum) consecutive-cosine edge
+    of the default (``start=None``) walk. Any candidate whose worst edge is
+    below ``default_min`` (past a ``1e-12`` epsilon, matching the tie margin
+    used elsewhere in this function) is discarded before scoring. Only among
+    the survivors -- the default walk is always one, by construction, so the
+    function always has something to return -- does the alternation-bonus
+    score (``sonic path cost + alternation_bonus * artist changes``) pick a
+    winner. This makes the ordering never-worse on the floor metric, the same
+    guarantee ``reorder_avoiding_low_support_terminal`` gives for its own floor.
 
     Returns ``(ordered, improved)``; ``improved`` is True when the winner differs
     from the default ``order_clusters`` walk.
@@ -423,6 +448,8 @@ def order_with_alternation(
     if bonus <= 0.0:
         return default, False
 
+    default_min = _min_edge(default, X_norm)
+
     def score(order: Sequence[int]) -> float:
         return _path_sonic_cost(order, X_norm) + bonus * _alternation_count(
             order, group_of_index
@@ -432,6 +459,8 @@ def order_with_alternation(
     best_score = score(default)
     for start in idx:
         cand = order_clusters(idx, X_norm, start=start)
+        if _min_edge(cand, X_norm) < default_min - 1e-12:
+            continue  # would break the worst-edge floor -- never a legal winner
         s = score(cand)
         if s > best_score + 1e-12:
             best, best_score = cand, s
