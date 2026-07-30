@@ -937,6 +937,90 @@ Last.fm-famous artists at the expense of niche ones you actually own).
 
 ---
 
+## Knob 13: Multi-artist blend (`playlists.ds_pipeline.multi_artist`)
+
+**Use when:** artist mode is given 2+ artist chips and the playlist should sit in the sonic/genre
+territory those artists *share* for its whole duration (spec
+`docs/superpowers/specs/2026-07-29-multi-artist-blend-design.md`) — e.g. Brian Eno + Harold Budd
+should skew ambient, not travel from Eno's catalog to Budd's and back. Inert below two chips.
+
+```yaml
+playlists:
+  ds_pipeline:
+    multi_artist:
+      enabled: true
+      overlap_weight: 0.6          # strength of the pull toward the other artist(s)
+      genre_share: 0.25            # split within the affinity term; the rest is MuQ
+      max_artists: 4
+      joint_pier_min_budget: 3     # min total piers before a jointly-credited seat is reserved
+      alternation_bonus: 0.15      # ordering preference for A/B/A/B; never overrides sonic cost
+      low_overlap_threshold: 0.15  # mean pier affinity below this -> report it to the user
+```
+
+**What it does.** Bundle rows are partitioned into one exclusive group per chip plus a joint group
+(tracks credited to 2+ chips, e.g. "Harold Budd and Brian Eno"). Each group gets a centered,
+L2-normalized MuQ prototype (`tag_steering.sonic_prototype_from_rows`); every candidate in a group
+is scored by a soft **overlap affinity** toward the *other* groups' prototype(s)
+(`(1 - genre_share)` MuQ cosine + `genre_share` dense-genre similarity), which biases —
+never gates — `cluster_artist_tracks`'s medoid (pier) selection for that group. The merged piers
+are then reordered with an alternation preference (A/B/A/B over A...A/B...B) that is bounded by a
+minimum-edge floor: any candidate ordering whose worst edge is below the default walk's worst edge
+is discarded before the alternation bonus is applied, so the preference can never trade a smooth
+default ordering for a "tidier" but worse one.
+
+**Pier budget and per-artist cap.** An N-group blend gets `N * base` piers (each group earns a
+single-artist-equivalent share), clamped to `track_count // 5` so bridge segments stay long enough
+to bridge — this replaced an earlier `// 3` clamp that starved a 3-group 30-track blend down to
+~2.2-track bridges and cratered its worst edge to 0.4645 (`// 5` recovered it to 0.6135; see
+`total_pier_budget` in `src/playlist/multi_artist.py` for the full account). The joint group claims
+a *minimum* of one seat once the total reaches `joint_pier_min_budget`, but may absorb more of the
+budget if the exclusive groups can't use it — it isn't capped at exactly one. The single-artist
+per-artist cap (`candidate_pool.max_artist_fraction`) is scaled by the surviving group count
+(joint group included) whenever a blend fires, so a legitimate N-way pier split doesn't
+self-report as `artist_cap_violation` in the GUI.
+
+**Which direction to move it:**
+- **Piers feel too characteristic of one artist, not the shared middle ground** → raise
+  `overlap_weight` (default `0.6`); `0.0` is the explicit rollback to per-artist-characteristic
+  piers.
+- **A blend's worst edge is at or below the absolute floor (`0.40` — see below) — first check
+  whether the alternation preference actually changed the ordering** (the log line below says so
+  explicitly); if it did, **lower `alternation_bonus`** before touching anything else. Sweeping
+  `overlap_weight` down also reduces how far medoid selection drifts from each artist's own
+  character, at the cost of a smaller "shared ground" effect.
+- **Playlist reports "these artists share little ground"** — that's `low_overlap_threshold`
+  firing; it's cosmetic (never blocks generation), so only retune it after reading real affinity
+  numbers across a few known-distant pairings, not preemptively.
+
+**Acceptance bar.** A blend is NOT held to single-artist smoothness — it deliberately spans two
+artists' territory, which is rougher by nature than either solo playlist. The guard is an absolute
+`min_transition` floor of `0.40`, calibrated 2026-07-30 from three real pairings at
+`track_count=30`: Eno+Budd 0.6135, Eno+Bowie 0.5490, Budd+Foxx 0.6478 (lowest observed 0.5490,
+comfortably above the floor and well clear of this project's break-glass edge-repair trigger,
+`T < 0.30`).
+
+**What to watch in the log** — every stage of the blend logs at INFO/WARNING under one prefix:
+
+```
+grep "Multi-artist" logs/playlists/<run>.log
+```
+
+Look for: `Multi-artist prototype: <label> n=<n> cohesion=<c>` (per-group prototype quality —
+low cohesion means that group's own catalog is sonically scattered, so its "pull" on the others is
+weak); `Multi-artist pier budget: total=<n> allocation=<dict>` (confirms the `// 5` clamp and the
+even/remainder split actually landed where expected); `Multi-artist ordering: alternation
+preference changed the pier walk (...)` (only logged when the alternation search found a legal,
+never-worse winner — its absence means the default greedy walk already won, and `alternation_bonus`
+is provably a no-op for that run); and `Multi-artist: <artist> share little sonic ground (mean pier
+affinity ...)` for the `low_overlap_threshold` notice. A dropped chip or a too-thin group logs its
+own named WARNING rather than silently vanishing from the pairing.
+
+**Status:** shipped default (`config.example.yaml`). Tests: `tests/unit/test_multi_artist.py`,
+`tests/integration/test_multi_artist_generation.py` (live-artifact acceptance, including the
+absolute worst-edge floor above).
+
+---
+
 ## The four mode axes and per-cohesion-mode knobs
 
 Cohesion-vs-discovery is exposed as four independent axes (`ARCHITECTURE.md` §"The four mode

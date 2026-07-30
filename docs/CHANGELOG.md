@@ -1,5 +1,18 @@
 # Playlist Generator Changelog
 
+## Unreleased
+
+### Artist mode
+
+- **Multi-artist blend.** Artist mode accepts 2+ artists and builds every pier from the
+  sonic/genre territory they share, rather than traveling from one artist's catalog to the
+  other's (Brian Eno + Harold Budd skews ambient; Brian Eno + David Bowie skews art rock).
+  Bundle rows split into one exclusive group per artist plus a joint group of jointly-credited
+  tracks; each group gets a centered MuQ prototype, and a soft "overlap affinity" (75% sonic /
+  25% genre by default) biases pier selection toward the other artists' territory — never a
+  gate, so a pairing with no shared ground still generates. New config block:
+  `playlists.ds_pipeline.multi_artist` (`docs/CONFIG.md`, `PLAYLIST_ORDERING_TUNING.md` Knob 13).
+
 ## v6.0.0 - Learned Sonic Embedding, Genre Authority, Browser GUI
 
 **Release Date:** 2026-07-11

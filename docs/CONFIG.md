@@ -305,6 +305,47 @@ medoid per cluster as a pier, instead of picking piers by the legacy heuristic.
 | `medoid_popularity_weight` | `0.0` | Off. Within-slot bias toward Last.fm-popular tracks. |
 | `toptracks_min_artist_tracks` | `8` | Minimum local tracks before fetching Last.fm top-tracks for popularity scoring — independent of `enabled`. |
 
+### `multi_artist`
+
+Artist mode with 2+ chips: every pier is drawn from the sonic/genre territory the named artists
+share (Brian Eno + Harold Budd skews ambient; Brian Eno + David Bowie skews art rock), instead of
+the playlist traveling from one artist's territory to the other's. Inert below two chips —
+single-artist requests take the unmodified legacy path. Soft bias only: it re-ranks pier
+candidates, it never gates or excludes, and a pairing with no shared ground still generates (see
+`PLAYLIST_ORDERING_TUNING.md`'s multi-artist blend knob for the full mechanism and tuning recipe).
+
+| Key | Shipped default | What it does |
+|---|---|---|
+| `enabled` | `true` | Master switch — live by default (principle 22). `false` with 2+ chips requested warns loudly and generates from the first artist alone, never a silent no-op. |
+| `overlap_weight` | `0.6` | Strength of the pull toward the other artist(s)' prototype in per-group medoid ranking. Raise it for piers to sit deeper in the shared region; `0.0` is a valid, explicit rollback to per-artist-characteristic piers (each group clusters as if solo). |
+| `genre_share` | `0.25` | Split within the overlap-affinity term — `(1 - genre_share)` MuQ cosine + `genre_share` dense-genre similarity. Sonic-dominant by default, consistent with genre being a nudge everywhere else in the engine. Renormalizes to pure-sonic (with a loud WARNING) if `X_genre_dense` is unavailable. |
+| `max_artists` | `4` | Ceiling on chips accepted; extra names are dropped with a WARNING naming them. Uncalibrated — revisit after listening to a 3+ chip blend. |
+| `joint_pier_min_budget` | `3` | Minimum total pier budget before the jointly-credited group (tracks credited to 2+ chips) is guaranteed a seat. Below this the joint group still exists but competes for surplus like any other group. |
+| `alternation_bonus` | `0.15` | Ordering preference for A/B/A/B pier sequencing — added per artist-change to the sonic path-cost score when choosing among candidate orderings. **Never an override**: any candidate whose worst edge is below the default walk's worst edge is discarded before scoring, so alternation cannot buy a tidy A/B/A/B pattern at the cost of a wrecked transition. Lower this if the worst-edge floor (see below) ever trips. |
+| `low_overlap_threshold` | `0.15` | Mean seated-pier affinity below this reports a relaxation notice ("these artists share little ground; piers stayed characteristic") — cosmetic only, never blocks generation. Placeholder pending a read of real affinity distributions across known-distant pairings. |
+
+**Pier budget.** Total piers for an N-group blend scale as `N * base` (each group gets a
+single-artist-equivalent share), clamped by `track_count // 5` so bridge segments stay long enough
+to be bridgeable — **not `// 3`**: that looser clamp measurably starved the beam (10 piers on a
+30-track/3-group blend, ~2.2-track bridges) and cratered the worst edge to 0.4645; `// 5` (~6
+piers, ~4.8-track bridges) recovered it to 0.6135. This clamp has no config surface — it's a fixed
+formula in `src/playlist/multi_artist.py::total_pier_budget`.
+
+**Per-artist cap scaling.** The single-artist per-artist cap (`candidate_pool.max_artist_fraction`)
+is scaled by the number of surviving artist groups (**the joint group counts** — Eno+Budd is 3
+groups, not 2) whenever the multi-artist branch produces piers, via
+`multi_artist_group_count` threaded into `max_artist_fraction_final`. Without this, a legitimate
+N-artist pier allocation self-reported as `artist_cap_violation` / `degraded` in the GUI on every
+successful blend, because the cap was sized for one seed artist while the blend deliberately gives
+each group its own allocation.
+
+**Worst-edge acceptance bar.** A blend is not held to single-artist smoothness — it spans two
+artists' territory by design. The guard is an absolute `min_transition` floor of `0.40` (no config
+key; enforced in the acceptance test `test_worst_edge_stays_above_an_absolute_floor`), calibrated
+2026-07-30 from three measured pairings at `track_count=30`: Eno+Budd 0.6135, Eno+Bowie 0.5490,
+Budd+Foxx 0.6478. `0.40` sits well clear of ordinary blend roughness (~0.55) and well above this
+project's break-glass edge-repair trigger (`T < 0.30`).
+
 ### Genre steering (`genre_steering_*`)
 
 The beam routes a per-segment genre arc toward the next pier, in addition to (not instead of) the
