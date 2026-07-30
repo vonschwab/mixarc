@@ -979,6 +979,43 @@ per-artist cap (`candidate_pool.max_artist_fraction`) is scaled by the surviving
 (joint group included) whenever a blend fires, so a legitimate N-way pier split doesn't
 self-report as `artist_cap_violation` in the GUI.
 
+**Pier duration floor (shared with single-artist/genre/history modes).** `min_track_duration_seconds`
+(shipped `46`) is a hard pre-clustering filter inside `cluster_artist_tracks` on pier candidacy
+itself, not just the bridge/candidate pool — added 2026-07-30 after a 0:36 "Vocal Outtakes" track
+seated as a pier and infected its whole segment. It applies to every group in a blend (each group's
+own `cluster_artist_tracks` call), same as the single-artist, genre-mode, and history-mode pier
+selectors. Unknown/zero duration is kept, never excluded. See `CONFIG.md`'s `playlists` top-level
+scalars section for the full account (call sites, the `DEFAULT_MIN_TRACK_DURATION_SECONDS`
+single-source constant, and the starvation-warning behavior).
+
+**Known limitations:**
+- **Popular Seeds (`popular_seeds_mode: on` / `fire`) has no effect on a blend's piers.** Once 2+
+  chips survive partition, `select_multi_artist_piers` owns pier selection outright and has no
+  popularity term — it never receives `popularity_values`. This is not a silent no-op: a WARNING
+  names the mode and states plainly that it has no effect on blend pier selection. A genuinely
+  popularity-biased blend pier selector would be a separate enhancement, not something that falls
+  out of this feature.
+- **Tag steering's pier-allocation and anchor injection are skipped on blends**, for the identical
+  reason — two pier selectors (tag-first piers and the blend) can't both own the pier list, and the
+  blend wins when 2+ chips are present. This is logged at INFO ("Multi-artist owns pier selection —
+  tag-steering pier allocation and anchor injection are skipped this run"). Tag steering's other
+  lever — the candidate-pool blend (`tag_steering_pool_blend`) — is untouched and still applies to
+  bridge-interior candidates.
+- **An artist with a diffuse catalog blends poorly, and the system says so rather than hiding it.**
+  Real measured pairing: Brian Eno + David Bowie gave `mean_affinity = 0.091`, below
+  `low_overlap_threshold` (`0.15`), and correctly surfaced the relaxation "these artists share
+  little sonic ground — piers stayed characteristic rather than meeting in the middle." Root cause:
+  Bowie's own prototype cohesion measured `0.463` — a catalog spanning Ziggy Stardust to *Low* to
+  *Let's Dance* does not collapse well into one centered MuQ prototype, so his "pull" on Eno's piers
+  is weak by construction, not by a bug. Read this as "pick a less chameleonic second artist," not
+  as something to retune away.
+- **Pier interleaving (A/B/A/B) is a preference, not a guarantee.** `alternation_bonus` is floored
+  so an interleaved ordering can never be chosen over one with a better worst edge — which means a
+  pairing sometimes falls short of clean alternation. Measured: Vegyn + Black Moth Super Rainbow
+  produced 3 artist changes out of 5 possible pier-to-pier transitions; Eno + Bowie produced 2 of 5.
+  Neither is a defect — both orderings satisfied the never-worse constraint; the sonic path simply
+  didn't have a same-or-better all-interleaved option available.
+
 **Which direction to move it:**
 - **Piers feel too characteristic of one artist, not the shared middle ground** → raise
   `overlap_weight` (default `0.6`); `0.0` is the explicit rollback to per-artist-characteristic
@@ -994,10 +1031,24 @@ self-report as `artist_cap_violation` in the GUI.
 
 **Acceptance bar.** A blend is NOT held to single-artist smoothness — it deliberately spans two
 artists' territory, which is rougher by nature than either solo playlist. The guard is an absolute
-`min_transition` floor of `0.40`, calibrated 2026-07-30 from three real pairings at
-`track_count=30`: Eno+Budd 0.6135, Eno+Bowie 0.5490, Budd+Foxx 0.6478 (lowest observed 0.5490,
-comfortably above the floor and well clear of this project's break-glass edge-repair trigger,
-`T < 0.30`).
+`min_transition` floor of `0.40`, calibrated 2026-07-30 directly from
+`test_worst_edge_stays_above_an_absolute_floor`'s three pairings — Eno+Budd, Eno+Bowie, Budd+Foxx
+(lowest observed worst edge 0.5490, comfortably above the floor and well clear of this project's
+break-glass edge-repair trigger, `T < 0.30`). Vegyn + Black Moth Super Rainbow is a later,
+independent measurement that also clears the floor comfortably but was not part of the calibration
+run. All measured at `track_count=30` through the real artifact/DB, not estimated:
+
+| Pairing | `mean_affinity` | Worst edge (`min_transition`) |
+|---|---|---|
+| Vegyn + Black Moth Super Rainbow | 0.468 | 0.642 |
+| Harold Budd + John Foxx | — | 0.6478 |
+| Brian Eno + Harold Budd | — | 0.6135 (0.623 on a later run — run-to-run noise, not a regression) |
+| Brian Eno + David Bowie | 0.091 | 0.5490 |
+
+`mean_affinity` is only recorded above for the two pairings it was captured for; "—" means not
+measured, not zero. The Eno+Bowie row is also the `low_overlap_threshold` (`0.15`) example in
+"Known limitations" above — its low `mean_affinity` and its lowest-of-the-set worst edge are the
+same underlying cause (Bowie's diffuse catalog), not two separate findings.
 
 **What to watch in the log** — every stage of the blend logs at INFO/WARNING under one prefix:
 

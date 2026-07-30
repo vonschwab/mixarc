@@ -115,7 +115,7 @@ Max subscription (`ARCHITECTURE.md` "Offline: the analyze pipeline").
 | `history_days` | `14` | General history lookback window. |
 | `max_age_days` | `14` | Max age for "recently generated" bookkeeping. |
 | `min_duration_minutes` | `90` | Minimum total playlist duration. |
-| `min_track_duration_seconds` / `max_track_duration_seconds` | `46` / `720` | Per-track duration admission window. |
+| `min_track_duration_seconds` / `max_track_duration_seconds` | `46` / `720` | Per-track duration admission window. **`min_track_duration_seconds` is also a HARD gate on PIER candidacy** (2026-07-30), not just bridge/candidate-pool fill — see the callout below. |
 | `max_tracks_per_artist` | `3` | Hard per-artist cap. |
 | `artist_window_size` / `max_artist_per_window` | `8` / `1` | Sliding-window artist-diversity constraint. |
 | `min_seed_artist_ratio` | `0.125` | Minimum fraction of the playlist that must be seed-artist tracks (artist mode). |
@@ -123,6 +123,26 @@ Max subscription (`ARCHITECTURE.md` "Offline: the analyze pipeline").
 | `recently_played_filter.enabled` | `true` | Recency exclusion switch. |
 | `recently_played_filter.lookback_days` | `30` | Recency window. Applied **pre-order**, during candidate-pool construction, never post-order — see the "Don't re-introduce post-order recency filtering" gotcha in the project `CLAUDE.md`. |
 | `recently_played_filter.min_playcount_threshold` | `0` | Minimum scrobble count before a track counts as "recently played." |
+
+**Pier duration floor (2026-07-30).** `min_track_duration_seconds` (shipped `46`) was a bridge/
+candidate-pool filter only until a real case slipped through it: `Brian Eno & David Byrne - Vocal
+Outtakes` (0:36) seated as a **pier** — the structural anchor a whole bridge segment is built
+around — because pier selection (`cluster_artist_tracks`) had no duration gate of its own. It is
+now a hard pre-clustering filter inside `cluster_artist_tracks` itself (`src/playlist/artist_style.py`),
+exposed as that function's `min_pier_duration_seconds` parameter and applied at all four call sites
+that select piers: single-artist (`create_playlist_for_artist`), multi-artist
+(`select_multi_artist_piers`'s per-group call), genre mode (`create_playlist_for_genre`), and
+history mode (`_create_playlists_from_single_artists`) — one choke point, so a future fifth caller
+can't bypass it by forgetting its own pre-filter. The fallback when the config key is absent is
+`src/config_loader.py::DEFAULT_MIN_TRACK_DURATION_SECONDS` (`46`) — a single source of truth added
+because the same fallback had quietly drifted to three different literals (47/46/90) across
+readers, inert only because the shipped config always pins the key explicitly. Unknown/zero
+duration is **kept, not excluded** (mirrors `genre_mode.filter_member_indices_by_duration` — missing
+metadata must never silently shrink the pier pool). If the gate starves an artist below the minimum
+cluster size, it logs a **WARNING naming the artist and the removed-track count**, then falls
+through to that path's existing thin-artist handling (single-artist: propagates to the artist-style
+fallback; multi-artist: the per-group relaxation catch) — it never crashes and never silently
+relaxes the floor.
 
 ---
 
@@ -342,9 +362,25 @@ each group its own allocation.
 **Worst-edge acceptance bar.** A blend is not held to single-artist smoothness — it spans two
 artists' territory by design. The guard is an absolute `min_transition` floor of `0.40` (no config
 key; enforced in the acceptance test `test_worst_edge_stays_above_an_absolute_floor`), calibrated
-2026-07-30 from three measured pairings at `track_count=30`: Eno+Budd 0.6135, Eno+Bowie 0.5490,
-Budd+Foxx 0.6478. `0.40` sits well clear of ordinary blend roughness (~0.55) and well above this
-project's break-glass edge-repair trigger (`T < 0.30`).
+2026-07-30 from the acceptance test's three measured pairings at `track_count=30`: Eno+Budd 0.6135
+(0.623 on a later run), Eno+Bowie 0.5490, Budd+Foxx 0.6478. `0.40` sits well clear of ordinary blend
+roughness (~0.55) and well above this project's break-glass edge-repair trigger (`T < 0.30`). See
+`PLAYLIST_ORDERING_TUNING.md` Knob 13 for the full calibration table (including a later, independent
+Vegyn + Black Moth Super Rainbow measurement) and per-pairing `mean_affinity`.
+
+**Known limitations.** Full detail, with measured examples, lives in
+`PLAYLIST_ORDERING_TUNING.md` Knob 13 — summary:
+- **Popular Seeds (`popular_seeds_mode: on`/`fire`) has no effect on blend pier selection.** The
+  blend owns pier selection outright once 2+ groups survive; it warns loudly rather than silently
+  no-opping, but the dial does nothing to blend piers.
+- **Tag steering's pier-allocation and anchor injection are skipped on blends**, for the same
+  reason (the blend owns pier selection). The candidate-pool tag lever is unaffected.
+- **A chameleon artist (diffuse catalog, low prototype cohesion) blends poorly, and the system
+  says so** rather than silently producing a bad blend — see the Eno+Bowie example in the tuning
+  doc.
+- **Pier interleaving (A/B/A/B) is a preference, not a guarantee** — `alternation_bonus` is floored
+  so it can never worsen the weakest transition, which means a pairing sometimes lands short of a
+  clean alternation.
 
 ### Genre steering (`genre_steering_*`)
 
