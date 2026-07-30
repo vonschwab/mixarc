@@ -436,6 +436,31 @@ def _forward_pier_gap_block_indices(
     return blocked
 
 
+def _derive_seed_artist_keys(
+    bundle, seed_indices: Sequence[int], *, override: Optional[Sequence[str]] = None
+) -> frozenset:
+    """Artist keys blocked from bridge interiors.
+
+    A SET so the multi-artist blend can block every named artist. The DEFAULT
+    derivation is deliberately unchanged from the single-key original: exactly
+    the FIRST seed's artist key. Tag-steering anchor injection puts OTHER
+    artists into seed_indices, so deriving from all of them would newly exclude
+    those artists from interiors and silently change existing output.
+
+    ``override`` replaces the derivation wholesale -- the multi-artist path
+    passes every chip artist.
+    """
+    if override is not None:
+        return frozenset(str(k) for k in override if k)
+    try:
+        if seed_indices:
+            key = identity_keys_for_index(bundle, int(seed_indices[0])).artist_key
+            return frozenset({key}) if key else frozenset()
+    except Exception:
+        pass
+    return frozenset()
+
+
 def build_pier_bridge_playlist(
     *,
     seed_track_ids: List[str],
@@ -484,6 +509,10 @@ def build_pier_bridge_playlist(
     # Floor a placed anchor's weaker flanking edge must clear; mirrors the
     # selection-time tag_steering_anchor_min_bridge.
     tag_anchor_min_bridge: float = 0.35,
+    # Multi-artist blend (Task 9): explicit override for the interior-block
+    # artist set. None (default) preserves the single-artist derivation
+    # (exactly seed_indices[0]'s artist key) byte-for-byte.
+    seed_artist_keys_override: Optional[Sequence[str]] = None,
 ) -> PierBridgeResult:
     """
     Build playlist using pier + bridge strategy.
@@ -1394,12 +1423,9 @@ def build_pier_bridge_playlist(
     # Build segments
     global_used: Set[int] = set(ordered_seeds)  # Seeds are already "used"
     # Track-key dedupe across the full run: prevent "same song twice" even if track_id differs.
-    seed_artist_key: Optional[str] = None
-    try:
-        if seed_indices:
-            seed_artist_key = identity_keys_for_index(bundle, int(seed_indices[0])).artist_key
-    except Exception:
-        seed_artist_key = None
+    seed_artist_keys = _derive_seed_artist_keys(
+        bundle, seed_indices, override=seed_artist_keys_override,
+    )
 
     seed_track_keys: Set[tuple[str, str]] = set()
     for sidx in set(int(i) for i in seed_indices):
@@ -1502,7 +1528,7 @@ def build_pier_bridge_playlist(
         _pier_artist_block = (
             {pier_a_ak, pier_b_ak} if cfg.disallow_pier_artists_in_interiors else None
         )
-        _disallow_seed = bool(cfg.disallow_seed_artist_in_interiors) and bool(seed_artist_key)
+        _disallow_seed = bool(cfg.disallow_seed_artist_in_interiors) and bool(seed_artist_keys)
         _allowed = allowed_set_indices
 
         def _row_ok(i: int, ak: str, tk: Tuple[str, str]) -> bool:
@@ -1510,7 +1536,7 @@ def build_pier_bridge_playlist(
                 return False
             if _allowed is not None and i not in _allowed:
                 return False
-            if _disallow_seed and ak == seed_artist_key:
+            if _disallow_seed and ak in seed_artist_keys:
                 return False
             if _pier_artist_block is not None and ak in _pier_artist_block:
                 return False
@@ -2023,7 +2049,7 @@ def build_pier_bridge_playlist(
                         genre_idf=genre_idf,
                         genre_vocab=genre_vocab,
                         artist_key_by_idx=(cand_artist_keys if cand_artist_keys else None),
-                        seed_artist_key=seed_artist_key,
+                        seed_artist_keys=seed_artist_keys,
                         recent_global_artists=recent_boundary_artists if seg_idx > 0 else None,
                         durations_ms=bundle.durations_ms,
                         artist_identity_cfg=artist_identity_cfg,
@@ -2962,7 +2988,7 @@ def build_pier_bridge_playlist(
                         cfg=cfg_used_for_segment,
                         beam_width=int(beam_width_used),
                         artist_key_by_idx=last_candidate_artist_keys,
-                        seed_artist_key=seed_artist_key,
+                        seed_artist_keys=seed_artist_keys,
                         recent_global_artists=_recent_artists_for_segment(seg_idx),
                         durations_ms=bundle.durations_ms,
                         artist_identity_cfg=artist_identity_cfg,
@@ -3006,7 +3032,7 @@ def build_pier_bridge_playlist(
                     cfg=cfg_used_for_segment,
                     beam_width=int(beam_width_used),
                     artist_key_by_idx=last_candidate_artist_keys,
-                    seed_artist_key=seed_artist_key,
+                    seed_artist_keys=seed_artist_keys,
                     recent_global_artists=_recent_artists_for_segment(seg_idx),
                     durations_ms=bundle.durations_ms,
                     artist_identity_cfg=artist_identity_cfg,

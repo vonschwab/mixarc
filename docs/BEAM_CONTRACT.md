@@ -88,7 +88,7 @@ edges_scored, failure_reason | None)` (`beam.py:159`).
   *transition-space* matrices that feed `T`; `X_full_norm` is the plain L2-normalized sonic matrix used
   for bridge-floor gating and progress geometry. Do not conflate them.
 - **Optional scoring inputs**, by subsystem: genre (`X_genre_*`, `g_targets_override`); identity/diversity
-  (`artist_key_by_idx`, `seed_artist_key`, `recent_global_artists`, `artist_identity_cfg`, `bundle`);
+  (`artist_key_by_idx`, `seed_artist_keys`, `recent_global_artists`, `artist_identity_cfg`, `bundle`);
   pace (`perceptual_bpm`, `tempo_stability`, `onset_rate`, `energy_matrix`); transition (`transition_metric_context`);
   roam (`roam_detour_sonic`, `roam_dev_energy`); tag-steering (`sonic_tag_affinity`, `sonic_tag_beam_weight`).
 
