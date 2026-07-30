@@ -481,3 +481,262 @@ def test_unresolvable_chip_still_generates_and_reports():
     assert r is not None and len(r["tracks"]) > 0
     blob = str(_playlist_warnings(r))
     assert "Xyzzy" in blob, f"the dropped chip was not reported: {blob}"
+
+
+# ---------------------------------------------------------------------------
+# Coordinator review 2026-07-30: findings 2, 3, 4, 5, 8, 9. The architectural
+# root cause -- create_playlist_for_artist grew two parallel post-pier-
+# selection tails when the blend was wired in, so five single-artist steps
+# (title exclusion, terminal-avoidance ordering, recency re-admission scope,
+# relaxation-merge robustness, and the Popular Seeds knob) were silently
+# skipped or scoped wrong for a blend. Each test below pins one of those.
+# ---------------------------------------------------------------------------
+
+
+@_requires_artifact
+def test_title_excluded_blend_pier_is_filtered_not_fatal():
+    """Review Finding 2: blend piers used to skip
+    self._filter_title_excluded_bundle_indices (the call the single-artist
+    tail always makes), so a blend medoid matching a user title-exclusion
+    word seated as a pier and _post_order_validate_ds_output aborted the
+    WHOLE generation with no recovery path (exempt_pier_track_ids only
+    covers the recency check, not the title check).
+
+    Uses a word taken directly from one of the fake blend's own pier titles,
+    so it is guaranteed to match -- then asserts generation still succeeds
+    with that pier gone, exactly like the single-artist path already does.
+    """
+    fake_piers, ordered, bundle = _fake_multi_artist_piers()
+    excluded_idx = ordered[0]
+    title = str(bundle.track_titles[excluded_idx] or "")
+    words = [w.strip(".,!?()[]\"'") for w in title.split()]
+    words = [w for w in words if len(w) >= 4]
+    if not words:
+        pytest.skip(f"pier title {title!r} has no word long enough to safely exclude")
+    exclusion_word = words[0]
+    excluded_track_id = str(bundle.track_ids[excluded_idx])
+
+    generator = _artist_generator([])
+    generator.config.config.setdefault("playlists", {}).setdefault(
+        "ds_pipeline", {}
+    ).setdefault("candidate_pool", {}).update({
+        "title_exclusion_enabled": True,
+        "title_exclusion_words": [exclusion_word],
+    })
+    with patch("src.playlist.multi_artist.select_multi_artist_piers", return_value=fake_piers):
+        result = generator.create_playlist_for_artist(
+            artist_name=ENO, artist_names=[ENO, BUDD], track_count=30, random_seed=0,
+        )
+    assert result is not None and result.get("tracks"), (
+        "blend generation must still succeed when a pier medoid was title-excluded, "
+        "not abort via post_order_validation_failed"
+    )
+    result_ids = {str(t.get("rating_key")) for t in result["tracks"]}
+    assert excluded_track_id not in result_ids, (
+        f"the title-excluded pier {excluded_track_id} ({title!r}) must not appear "
+        "in the final playlist"
+    )
+
+
+@_requires_artifact
+def test_thin_first_chip_does_not_abort_before_blend_logic_runs(monkeypatch):
+    """Review Finding 3: the >=4-track gate near the top of
+    create_playlist_for_artist only ever looked at the PRIMARY chip's own
+    library tracks, returning None before select_multi_artist_piers /
+    partition_artist_groups (which are written to handle exactly a thin
+    first chip: drop it, or build from the surviving chip plus any joint
+    credit) ever got a chance to run. Swapping chip order made the identical
+    pairing succeed -- that asymmetry was the bug.
+
+    Synthetic library: 'Thin One' has 2 tracks (below the 4-track floor) and
+    no collaboration credit with anyone; 'Strong Two' has 5. Neither exists
+    in the real sonic artifact, so this generation cannot actually complete
+    -- but the OLD code returned None (logging 'Artist has only 2 total
+    tracks') right here, before the artifact/bundle was even touched. The fix
+    must get PAST that point and fail later, for the unrelated reason that
+    the synthetic track_ids aren't in the artifact -- never via the early
+    return.
+    """
+    generator = _artist_generator([])
+
+    def fake_get_all_tracks():
+        # duration is milliseconds (src.playlist.filtering.is_valid_duration) --
+        # 200_000ms = 200s, comfortably inside the 47-720s valid window so the
+        # automatic-seed-selection step downstream doesn't reject these
+        # synthetic tracks for an unrelated reason before we even reach the
+        # artifact-lookup failure this test expects.
+        tracks = []
+        for i in range(2):
+            tracks.append({
+                "rating_key": f"thin{i}", "artist": "Thin One",
+                "title": f"Thin song {i}", "duration": 200_000,
+            })
+        for i in range(5):
+            tracks.append({
+                "rating_key": f"strong{i}", "artist": "Strong Two",
+                "title": f"Strong song {i}", "duration": 200_000,
+            })
+        return tracks
+
+    monkeypatch.setattr(generator.library, "get_all_tracks", fake_get_all_tracks)
+
+    with pytest.raises(ValueError, match="found in the current"):
+        generator.create_playlist_for_artist(
+            artist_name="Thin One", artist_names=["Thin One", "Strong Two"],
+            track_count=30, random_seed=0,
+        )
+
+
+@_requires_artifact
+@pytest.mark.integration
+@pytest.mark.slow
+def test_recency_readmission_scope_covers_every_chip():
+    """Review Finding 4: seed_recency_exclusion_for_presence's artist-track
+    scope was built from artist_name (chip #1) alone -- chip #2..N's tracks
+    were invisible to the re-admission calculation entirely, so a starved
+    second chip's recently-played tracks could never be re-admitted no
+    matter how badly its group needed them. The scope passed in must cover
+    every requested chip, not just the primary."""
+    import src.playlist.seed_eligibility as seed_eligibility_mod
+
+    bundle = load_artifact_bundle(str(ART), sonic_variant_override="muq")
+    eno_ids = {
+        str(bundle.track_ids[i])
+        for i in _artist_indices_in_bundle(bundle, ENO, include_collaborations=False)
+    }
+    budd_ids = {
+        str(bundle.track_ids[i])
+        for i in _artist_indices_in_bundle(bundle, BUDD, include_collaborations=False)
+    }
+
+    generator = _artist_generator([])
+    generator._get_local_history = lambda: [{"dummy": True}]
+    generator._compute_excluded_from_history = lambda *a, **k: {next(iter(budd_ids))}
+
+    captured = {}
+    real_fn = seed_eligibility_mod.seed_recency_exclusion_for_presence
+
+    def _spy(artist_track_ids, recency_excluded_ids, target_piers, **kwargs):
+        captured["artist_track_ids"] = set(str(t) for t in artist_track_ids)
+        return real_fn(artist_track_ids, recency_excluded_ids, target_piers, **kwargs)
+
+    with patch(
+        "src.playlist.seed_eligibility.seed_recency_exclusion_for_presence",
+        side_effect=_spy,
+    ):
+        generator.create_playlist_for_artist(
+            artist_name=ENO, artist_names=[ENO, BUDD], track_count=30,
+            random_seed=0, exclude_seed_tracks_from_recency=True,
+        )
+    scope = captured.get("artist_track_ids")
+    assert scope is not None, "seed_recency_exclusion_for_presence was never called"
+    assert scope & budd_ids, (
+        f"Harold Budd's tracks must be part of the recency re-admission scope, "
+        f"got scope of size {len(scope)}"
+    )
+    assert scope & eno_ids, "Brian Eno's tracks must still be part of the scope"
+
+
+@_requires_artifact
+@pytest.mark.integration
+@pytest.mark.slow
+def test_blend_failed_relaxations_survive_a_failing_fallback():
+    """Review Finding 5: the relaxation merge used to be nested inside
+    `if using_artist_style and style_seed_track_id and style_allowed_track_ids:`.
+    MultiArtistBlendFailed's relaxations are stashed when the blend fails, but
+    generation continues via the single-artist artist-style fallback in the
+    SAME branch -- if that fallback then ALSO raised (not just the
+    pool-too-small ValueError the branch already retries), the broad
+    ``except Exception`` around the whole artist-style block set
+    using_artist_style=False and reran through the legacy `else:` branch
+    instead, discarding every relaxation collected so far. Forces exactly
+    that sequence: MultiArtistBlendFailed, then a style-clustering failure
+    (a real exception from the artist-style tail, not the ValueError this
+    test would otherwise have to reverse-engineer), then confirms the legacy
+    fallback still completes AND the relaxations still surface.
+    """
+    failure = MultiArtistBlendFailed(
+        "Multi-artist: all 2 surviving group(s) were too thin to cluster.",
+        [{
+            "type": "relaxation", "scope": "multi_artist", "bridge": "Brian Eno",
+            "relaxed": ["3 piers (only 1 track in your library)"], "severity": "info",
+        }],
+    )
+    generator = _artist_generator([])
+    with patch("src.playlist.multi_artist.select_multi_artist_piers", side_effect=failure):
+        with patch(
+            "src.playlist.artist_style.cluster_artist_tracks",
+            side_effect=RuntimeError("forced artist-style failure for Finding 5"),
+        ):
+            result = generator.create_playlist_for_artist(
+                artist_name=ENO, artist_names=[ENO, BUDD], track_count=30, random_seed=0,
+            )
+    assert result is not None and result.get("tracks"), (
+        "the legacy fallback must still complete a playlist"
+    )
+    warnings = (
+        (result.get("ds_report") or {}).get("playlist_stats", {}).get("playlist", {}).get("warnings")
+        or []
+    )
+    matches = [
+        w for w in warnings
+        if isinstance(w, dict) and w.get("type") == "relaxation" and w.get("scope") == "multi_artist"
+    ]
+    assert matches, (
+        f"MultiArtistBlendFailed's relaxations must survive even when the "
+        f"artist-style fallback ALSO fails and generation falls back to the "
+        f"legacy path: {warnings}"
+    )
+
+
+@_requires_artifact
+def test_terminal_avoidance_applies_to_blend_piers():
+    """Review Finding 8: support_by_index / _terminal_avoidance_support were
+    computed only inside the single-artist tail, so a blend could seat a
+    sonic-outlier pier in the closing seat -- order_with_alternation (sonic
+    path cost + alternation only) has no notion of within-artist support.
+    Forces a MultiArtistPiers whose LAST pier looks catastrophically
+    low-support and everything else high-support, so
+    reorder_avoiding_low_support_terminal has an unambiguous reason to move
+    it off the terminal seat, and asserts the dispatched pier order changed.
+    """
+    fake_piers, ordered, bundle = _fake_multi_artist_piers()
+    assert len(ordered) >= 3, "need >= 3 piers for a non-trivial terminal seat"
+    fake_piers.support_by_index = {i: 1.0 for i in ordered}
+    fake_piers.support_by_index[ordered[-1]] = 0.0
+
+    generator = _artist_generator([])
+    _capture_dispatch(generator)
+    with patch("src.playlist.multi_artist.select_multi_artist_piers", return_value=fake_piers):
+        with pytest.raises(_DispatchCaptured) as excinfo:
+            generator.create_playlist_for_artist(
+                artist_name=ENO, artist_names=[ENO, BUDD], track_count=30, random_seed=0,
+            )
+    starved_id = str(bundle.track_ids[ordered[-1]])
+    assert excinfo.value.pier_ids[-1] != starved_id, (
+        f"the artificially-starved-support pier {starved_id} should have been "
+        f"moved off the terminal seat, got order {excinfo.value.pier_ids}"
+    )
+
+
+@_requires_artifact
+def test_popular_seeds_on_warns_loudly_during_blend(caplog):
+    """Review Finding 9: select_multi_artist_piers has no popularity term and
+    never receives popularity_values -- a configured knob that cannot act
+    must warn loudly, not silently no-op (project gotcha). This is the
+    required minimum fix; genuinely popularity-biased blend piers are a
+    separate, optional enhancement."""
+    fake_piers, _ordered, _bundle = _fake_multi_artist_piers()
+    generator = _artist_generator([])
+    _capture_dispatch(generator)
+    with caplog.at_level(logging.WARNING):
+        with patch("src.playlist.multi_artist.select_multi_artist_piers", return_value=fake_piers):
+            with pytest.raises(_DispatchCaptured):
+                generator.create_playlist_for_artist(
+                    artist_name=ENO, artist_names=[ENO, BUDD], track_count=30,
+                    random_seed=0, popular_seeds_mode="on",
+                )
+    assert any(
+        "Popular Seeds" in r.message and "no effect" in r.message
+        for r in caplog.records
+    ), "Popular Seeds mode 'on' during a blend must warn loudly, not silently no-op"

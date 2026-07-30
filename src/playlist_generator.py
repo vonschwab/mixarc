@@ -1540,6 +1540,27 @@ class PlaylistGenerator:
             if safe_get_artist_key(t) == artist_key
         ]
 
+        # Multi-artist blend (review Finding 3): a thin PRIMARY chip must not
+        # abort generation before the blend's own group logic
+        # (partition_artist_groups / select_multi_artist_piers, which run
+        # much further down) gets a chance to run -- they are written to
+        # handle exactly this: drop the thin chip, or build piers from the
+        # surviving chip(s) plus any joint credit. Both early "not enough
+        # tracks" returns below previously looked at `artist_tracks`
+        # (primary-only), so a thin FIRST chip aborted even when a
+        # well-stocked second chip was requested alongside it -- swapping
+        # chip order made the identical pairing succeed. Compute every
+        # requested chip's combined library reach once, up front, and let
+        # both early returns below consult it before giving up.
+        _early_ma_names = [n for n in (artist_names or []) if str(n).strip()]
+        _ma_combined_track_count: Optional[int] = None
+        if len(_early_ma_names) >= 2:
+            _combined_keys = {normalize_artist_key(n) for n in _early_ma_names}
+            _ma_combined_track_count = len({
+                t.get('rating_key') for t in all_library_tracks
+                if safe_get_artist_key(t) in _combined_keys
+            })
+
         # Mix in collaborations when explicitly requested, or as a fallback when
         # the artist has too few solo tracks to seed from.
         solo_count = len(artist_tracks)
@@ -1577,17 +1598,33 @@ class PlaylistGenerator:
                     len(artist_tracks), solo_count, len(collaboration_tracks),
                 )
             elif solo_count < 4:
-                logger.warning(
-                    "Artist has only %d tracks and no collaborations found, need at least 4",
-                    solo_count,
-                )
-                return None
+                if _ma_combined_track_count is not None and _ma_combined_track_count >= 4:
+                    logger.info(
+                        "Multi-artist: primary chip '%s' has only %d solo track(s) and no "
+                        "collaborations, but the pairing %s has %d combined -- continuing "
+                        "to blend pier selection instead of aborting (review Finding 3).",
+                        artist_name, solo_count, _early_ma_names, _ma_combined_track_count,
+                    )
+                else:
+                    logger.warning(
+                        "Artist has only %d tracks and no collaborations found, need at least 4",
+                        solo_count,
+                    )
+                    return None
             elif include_collaborations:
                 logger.info("No collaboration tracks found for %s; using solo tracks only", artist_name)
 
         if len(artist_tracks) < 4:
-            logger.warning(f"Artist has only {len(artist_tracks)} total tracks (including collaborations), need at least 4")
-            return None
+            if _ma_combined_track_count is not None and _ma_combined_track_count >= 4:
+                logger.info(
+                    "Multi-artist: primary chip '%s' has only %d track(s) (including "
+                    "collaborations), but the pairing %s has %d combined -- continuing "
+                    "to blend pier selection instead of aborting (review Finding 3).",
+                    artist_name, len(artist_tracks), _early_ma_names, _ma_combined_track_count,
+                )
+            else:
+                logger.warning(f"Artist has only {len(artist_tracks)} total tracks (including collaborations), need at least 4")
+                return None
 
         logger.info(f"Using {len(artist_tracks)} tracks for {artist_name}")
 
@@ -1922,6 +1959,13 @@ class PlaylistGenerator:
         style_allowed_track_ids: Optional[List[str]] = None
         style_ds_allowed_track_ids: Optional[List[str]] = None
         internal_connector_ids: Optional[List[str]] = None
+        # Initialized here (not just inside the try block below) so the
+        # Finding-5 relaxation merge at this function's ds_tracks
+        # reconvergence point can safely check it even when the artist-style
+        # block below never runs at all (style_cfg.enabled False, artist_only,
+        # track_title, or fixed_seed_tracks) -- all of which are ordinary
+        # single-artist paths with nothing to merge.
+        _multi_artist_relaxations: List[Dict[str, Any]] = []
 
         if style_cfg.enabled and artifact_path and (not artist_only) and (not track_title) and not fixed_seed_tracks:
             try:
@@ -2076,17 +2120,31 @@ class PlaylistGenerator:
                 _relaxed_excluded = None
                 if exclude_seed_tracks_from_recency and seed_recency_excluded_ids:
                     from src.playlist.seed_eligibility import seed_recency_exclusion_for_presence
+                    # Multi-artist blend (review Finding 4): recency re-admission
+                    # must cover every requested chip, not just the primary --
+                    # `_early_ma_names` was computed above alongside the thin-
+                    # first-chip gate (Finding 3). Scoping this to `artist_name`
+                    # alone left chip #2..N's recently-played tracks hard-
+                    # excluded, so their groups fell under the cluster floor and
+                    # the user saw a false "not enough tracks in your library"
+                    # notice for a catalog they own in full. A single-artist call
+                    # (no second chip) collapses this to exactly today's set --
+                    # `_early_ma_names` is empty, so the loop below runs once,
+                    # over `artist_name`, same as the code it replaces.
+                    _recency_scope_names = list(dict.fromkeys([artist_name] + _early_ma_names))
+                    _recency_scope_indices: List[int] = []
+                    for _recency_name in _recency_scope_names:
+                        _recency_scope_indices.extend(_artist_indices_in_bundle(
+                            bundle, _recency_name, include_collaborations=include_collaborations))
+                    _recency_scope_indices = list(dict.fromkeys(_recency_scope_indices))
                     _artist_ids = {
-                        str(bundle.track_ids[i]) for i in _artist_indices_in_bundle(
-                            bundle, artist_name, include_collaborations=include_collaborations)
+                        str(bundle.track_ids[i]) for i in _recency_scope_indices
                     }
                     _rank = None
                     if popularity_values is not None:
-                        _idxs = _artist_indices_in_bundle(
-                            bundle, artist_name, include_collaborations=include_collaborations)
                         _rank = [
                             str(bundle.track_ids[i]) for i in sorted(
-                                _idxs, key=lambda i: float(popularity_values[i]), reverse=True)
+                                _recency_scope_indices, key=lambda i: float(popularity_values[i]), reverse=True)
                         ]
                     _relaxed_excluded = seed_recency_exclusion_for_presence(
                         _artist_ids, seed_recency_excluded_ids, target_pier_count,
@@ -2095,9 +2153,9 @@ class PlaylistGenerator:
                     _readmitted = len(seed_recency_excluded_ids) - len(_relaxed_excluded or set())
                     if _readmitted:
                         logger.info(
-                            "Seed presence: re-admitted %d recently-played %s track(s) to fill "
-                            "target_piers=%d (fresh pool was short)",
-                            _readmitted, artist_name, target_pier_count,
+                            "Seed presence: re-admitted %d recently-played track(s) across "
+                            "%s to fill target_piers=%d (fresh pool was short)",
+                            _readmitted, _recency_scope_names, target_pier_count,
                         )
 
                 # --- Tag-first pier member set M (authority on-tag; None => legacy) ---
@@ -2236,6 +2294,20 @@ class PlaylistGenerator:
                             "allocation and anchor injection are skipped this run "
                             "(the candidate-pool tag lever is unaffected).",
                         )
+                    if popular_seeds_mode in {"on", "fire"}:
+                        # Review Finding 9: select_multi_artist_piers has no
+                        # popularity term and never receives popularity_values --
+                        # a configured knob that cannot act must warn loudly, not
+                        # silently no-op (project gotcha). Genuinely popularity-
+                        # biased blend piers are a separate, optional enhancement;
+                        # this is the required minimum.
+                        logger.warning(
+                            "Multi-artist: Popular Seeds mode '%s' has no effect on "
+                            "blend pier selection — select_multi_artist_piers picks "
+                            "piers by sonic/genre overlap only, with no popularity "
+                            "term. This dial is a no-op while 2+ artists are blended.",
+                            popular_seeds_mode,
+                        )
                     ordered_medoids = list(_ma_piers.ordered_medoids)
                     _multi_artist_blocked_keys = _ma_piers.blocked_artist_keys
                     _multi_artist_relaxations = list(_ma_piers.relaxations)
@@ -2247,9 +2319,49 @@ class PlaylistGenerator:
                     # pier allocation self-reports as "degraded" on every
                     # successful blend (human ruling, task-10 review).
                     _multi_artist_group_count = len(_ma_piers.groups)
+
+                    # Review Finding 8: arc-aware terminal-avoidance reorder.
+                    # select_multi_artist_piers's own per-group cluster_artist_
+                    # tracks calls already compute within-artist support
+                    # (support_by_index) -- this mirrors the single-artist tail's
+                    # _cap_order / explicit reorder_avoiding_low_support_terminal
+                    # calls, using the SAME shared function, so a blend cannot
+                    # seat a sonic-outlier pier in the closing seat just because
+                    # order_with_alternation (sonic path cost + alternation only)
+                    # has no notion of within-artist support.
+                    if style_cfg.pier_support_terminal_avoidance and _ma_piers.support_by_index:
+                        _ma_xraw = np.asarray(getattr(bundle, "X_sonic"), dtype=float)
+                        _ma_xnorm = _ma_xraw / (np.linalg.norm(_ma_xraw, axis=1, keepdims=True) + 1e-12)
+                        ordered_medoids, _ma_terminal_changed = reorder_avoiding_low_support_terminal(
+                            ordered_medoids, _ma_piers.support_by_index, _ma_xnorm,
+                        )
+                        if _ma_terminal_changed:
+                            logger.info(
+                                "Multi-artist arc-aware ordering: moved the lowest-support "
+                                "pier off the terminal seat (support=%.3f) via an alternate "
+                                "sonic-order start",
+                                min(_ma_piers.support_by_index.get(i, 1.0) for i in ordered_medoids),
+                            )
+
+                    # Review Finding 2: blend piers must pass the same title-
+                    # exclusion filter the single-artist tail applies
+                    # (self._filter_title_excluded_bundle_indices, below) --
+                    # otherwise a blend medoid matching a user title-exclusion
+                    # word seats as a pier and _post_order_validate_ds_output
+                    # aborts the WHOLE generation later with no recovery path
+                    # (exempt_pier_track_ids only covers the recency check).
+                    ordered_medoids = self._filter_title_excluded_bundle_indices(
+                        bundle, ordered_medoids, context="artist_style_piers",
+                    )
+                    if not ordered_medoids:
+                        raise ValueError("Multi-artist style piers empty after title exclusions")
+
                     # Diagnostics-only stand-ins for the single-artist clustering
                     # locals style_summary / the ENABLED log below read: one
                     # "cluster" per artist group, its seated piers as members.
+                    # Built AFTER the terminal-avoidance reorder and title filter
+                    # above so they reflect the FINAL pier set, not the
+                    # pre-adjustment one.
                     clusters = [list(g.indices) for g in _ma_piers.groups]
                     _ma_group_sets = [set(g.indices) for g in _ma_piers.groups]
                     medoids_by_cluster = [
@@ -2736,25 +2848,6 @@ class PlaylistGenerator:
                 else:
                     # Different error, re-raise
                     raise
-            if _multi_artist_relaxations and self._last_ds_report is not None:
-                # Fold the pier-selection-time relaxations (dropped chips,
-                # thin-group failures, low-overlap notice) into this run's
-                # relaxation list -- the same list the web GUI's
-                # RelaxationNotice reads (worker.py filters playlist_stats.
-                # playlist.warnings for type=="relaxation"). Merged here
-                # (post-generation) rather than threaded through the DS
-                # pipeline call chain, since these were produced before
-                # generation started and pier_bridge_builder's own
-                # relaxations already land in this same list.
-                _pstats = self._last_ds_report.setdefault("playlist_stats", {})
-                _playlist_stats = _pstats.setdefault("playlist", {})
-                _playlist_stats["warnings"] = (
-                    list(_playlist_stats.get("warnings") or []) + _multi_artist_relaxations
-                )
-                logger.info(
-                    "Multi-artist: merged %d relaxation(s) into this run's warnings.",
-                    len(_multi_artist_relaxations),
-                )
         else:
             logger.info("Artist style mode DISABLED: using legacy seed selection")
             for i, seed_track in enumerate(seed_tracks):
@@ -2795,6 +2888,35 @@ class PlaylistGenerator:
                 f"'python scripts/analyze_library.py' (or click \"Analyze Library\" in the GUI) to extract "
                 f"sonic features and rebuild the artifact; or (2) the artifact was rebuilt but this process "
                 f"is still holding an older copy in memory — restart the GUI/worker to pick up the rebuild."
+            )
+
+        # Review Finding 5: fold pier-selection-time multi-artist relaxations
+        # (dropped chips, thin-group failures, low-overlap notice) into this
+        # run's relaxation list -- the same list the web GUI's
+        # RelaxationNotice reads (worker.py filters playlist_stats.playlist.
+        # warnings for type=="relaxation"). Deliberately placed here, at the
+        # reconvergence point of the artist-style and legacy branches (both
+        # set ds_tracks before the check above), rather than nested inside
+        # `if using_artist_style ...:` -- MultiArtistBlendFailed's relaxations
+        # are stashed at the point the blend fails, but generation continues
+        # via the single-artist artist-style fallback in the SAME branch. If
+        # that fallback then also raised (any exception, not just the
+        # pool-too-small ValueError this branch already retries), the broad
+        # `except Exception` around the artist-style block sets
+        # using_artist_style=False and reruns through the `else:` legacy
+        # branch instead -- merging only inside `if using_artist_style:` would
+        # have discarded every relaxation collected so far the instant that
+        # happened, silently defeating the exact plumbing that exists to
+        # explain a blend failure to the user.
+        if _multi_artist_relaxations and self._last_ds_report is not None:
+            _pstats = self._last_ds_report.setdefault("playlist_stats", {})
+            _playlist_stats = _pstats.setdefault("playlist", {})
+            _playlist_stats["warnings"] = (
+                list(_playlist_stats.get("warnings") or []) + _multi_artist_relaxations
+            )
+            logger.info(
+                "Multi-artist: merged %d relaxation(s) into this run's warnings.",
+                len(_multi_artist_relaxations),
             )
 
         # Skip seed insertion for pier-bridge mode - pier-bridge already handles seed placement
