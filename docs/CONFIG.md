@@ -350,10 +350,21 @@ config key for this any more — `alternation_bonus` was a scored preference ove
 (`order_clusters`' own greedy walks) that structurally could never contain an interleaved order in
 the first place, so the bonus weight had nothing to buy; it is deleted, and a leftover value in
 config.yaml is caught and warned on loudly at startup
-(`src.playlist_gui.worker._RETIRED_MULTI_ARTIST_KEYS`). The ONE case alternation yields: if the best
-maximally-alternating order's worst edge falls below the absolute floor below, it falls back to the
-best-available order regardless of alternation and logs a WARNING naming both worst-edge values. See
-`PLAYLIST_ORDERING_TUNING.md` Knob 13 for the full mechanism and measured examples.
+(`src.playlist_gui.worker._RETIRED_MULTI_ARTIST_KEYS`).
+
+Alternation yields by a **ladder**, not a cliff: the search takes the best order at each alternation
+level from the theoretical maximum downward, and keeps the HIGHEST level whose pier-to-pier worst
+edge clears `PIER_ADJACENCY_ALTERNATION_FLOOR` (`0.08`, in `src/playlist/multi_artist.py`). Only if
+no level clears it does it fall back to the unconstrained best order — which by construction can
+never be less alternating than that same order, since every level above was tried first. An earlier
+all-or-nothing valve regressed a real pairing (Eno+Bowie) to *less* interleaving than before the
+rewrite; the ladder exists because of that.
+
+Note that `0.08` measures **pier-to-pier adjacency**, a different and naturally much lower quantity
+than `ABSOLUTE_MIN_TRANSITION_FLOOR` (`0.40`), which measures the **final playlist's**
+`min_transition` after the beam has bridged the gaps between piers. Conflating the two fired the
+valve far too eagerly. Both floors are live and independent. See `PLAYLIST_ORDERING_TUNING.md`
+Knob 13 for the full mechanism and measured examples.
 
 **Pier budget.** Total piers for an N-group blend scale as `N * base` (each group gets a
 single-artist-equivalent share), clamped by `track_count // 5` so bridge segments stay long enough
@@ -389,11 +400,12 @@ ordinary blend roughness (~0.55) and well above this project's break-glass edge-
 - **A chameleon artist (diffuse catalog, low prototype cohesion) blends poorly, and the system
   says so** rather than silently producing a bad blend — see the Eno+Bowie example in the tuning
   doc.
-- **Pier interleaving (A/B/A/B) is FORCED to the theoretical maximum, with one safety valve.**
-  `order_with_alternation` computes the true max achievable alternation for the group sizes and
-  forces it; it only falls back to the best-available (possibly clumped) order when forcing would
-  push the pier-to-pier worst edge below the absolute floor above — see `PLAYLIST_ORDERING_TUNING.md`
-  Knob 13 for measured examples of both outcomes.
+- **Pier interleaving (A/B/A/B) is FORCED to the highest level that keeps a healthy pier edge.**
+  `order_with_alternation` computes the true max achievable alternation for the group sizes, then
+  walks a ladder down from it, keeping the highest level whose pier-to-pier worst edge clears
+  `PIER_ADJACENCY_ALTERNATION_FLOOR` (`0.08`). Measured 2026-07-30, alternation before the rewrite →
+  after: Vegyn + Black Moth Super Rainbow 1/5 → **5/5**; Brian Eno + Harold Budd → **4/5**;
+  Brian Eno + David Bowie 2/5 → **5/5**. See `PLAYLIST_ORDERING_TUNING.md` Knob 13.
 
 ### Genre steering (`genre_steering_*`)
 

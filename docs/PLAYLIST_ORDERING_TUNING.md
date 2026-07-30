@@ -973,10 +973,22 @@ now (1) computes the theoretical maximum alternation achievable for the actual g
 `n - 1`; a majority group forces `2*m - n - 1` repeats (4+2 piers tops out at 4 of 5 changes, not 5)
 — (2) searches every order that reaches that maximum (exact permutation search through 8 piers,
 a bounded beam search above that) and picks the one with the highest minimum edge, tie-broken by
-total sonic cost, and (3) has one safety valve: if the best maximally-alternating order's worst edge
-falls below the absolute floor (`0.40`, same value as the acceptance bar below —
-`multi_artist.ABSOLUTE_MIN_TRANSITION_FLOOR`), alternation yields — it falls back to the
-best-available order regardless of alternation and logs a WARNING naming both worst-edge values.
+total sonic cost, and (3) yields by a LADDER rather than a cliff: it computes the best order at each
+alternation level from the maximum downward, and keeps the HIGHEST level whose pier-to-pier worst
+edge clears `PIER_ADJACENCY_ALTERNATION_FLOOR` (`0.08`). Only when no level clears it does it fall
+back to the unconstrained best order — which can never be less alternating than that order, since
+every level above it was already tried and rejected. Each outcome logs at INFO (achieved level vs
+theoretical max, chosen worst edge, unconstrained worst edge), so the trade is visible in
+`logs/playlists/`.
+
+**The two floors measure different things — don't conflate them.** `PIER_ADJACENCY_ALTERNATION_FLOOR`
+(`0.08`) is a **pier-to-pier** adjacency, naturally low because piers are deliberately spread apart
+and the beam bridges the gaps. `ABSOLUTE_MIN_TRANSITION_FLOOR` (`0.40`, the acceptance bar below) is
+the **final playlist's** `min_transition` between consecutive emitted tracks. The first cut of this
+rewrite compared pier adjacency against `0.40` and fired the valve on 2 of 3 real pairings,
+regressing Eno+Bowie to *less* interleaving than before the rewrite. Both floors are live and
+independent.
+
 There is no longer a bonus weight to tune; a leftover `alternation_bonus` key in config.yaml is
 caught and warned on loudly at startup (`src.playlist_gui.worker._RETIRED_MULTI_ARTIST_KEYS`).
 
@@ -1021,18 +1033,20 @@ single-source constant, and the starvation-warning behavior).
   *Let's Dance* does not collapse well into one centered MuQ prototype, so his "pull" on Eno's piers
   is weak by construction, not by a bug. Read this as "pick a less chameleonic second artist," not
   as something to retune away.
-- **Pier interleaving only falls short of the theoretical maximum when forcing it would break a
-  transition.** The safety valve (above) is the ONE case alternation yields. Measured 2026-07-30
-  (`track_count=30`, real artifact/DB): Vegyn + Black Moth Super Rainbow reached full alternation
-  (5 of 5 possible changes, chosen worst pier-to-pier edge 0.5133 — well above the floor); Eno+Budd
-  and Eno+Bowie both tripped the safety valve (forcing 5/5 would have left a pier-to-pier edge of
-  0.0120 and 0.0413 respectively, both far below `0.40`), so both fell back to their best-available
-  order instead — Eno+Budd landed 3/5 changes anyway (worst edge 0.4905), Eno+Bowie's best-available
-  order is the fully clumped one (1/5 changes, worst edge 0.3680 — itself below the pier-level
-  floor, though the beam's bridging still delivers a final playlist `min_transition` of 0.5490; see
-  the acceptance-bar table below). This is not a defect: these two pairings' cross-artist piers are
-  too far apart to interleave without a broken transition, and the system says so in the log rather
-  than shipping one anyway.
+- **Pier interleaving reaches or approaches the theoretical maximum on real pairings.** Measured
+  2026-07-30 (`track_count=30`, real artifact/DB), alternation before the forced-interleaving
+  rewrite → after the ladder:
+
+  | Pairing | Before | After | Pier-to-pier worst edge |
+  |---|---|---|---|
+  | Vegyn + Black Moth Super Rainbow | 1 of 5 | **5 of 5** | 0.5133 |
+  | Brian Eno + Harold Budd | — | **4 of 5** | 0.3212 |
+  | Brian Eno + David Bowie | 2 of 5 | **5 of 5** | 0.1967 |
+
+  Eno+Budd stops one level short of the maximum because forcing 5/5 there would leave a pier-to-pier
+  edge of `0.0120` — two near-orthogonal piers adjacent — so the ladder keeps 4/5 instead. That is
+  the mechanism working, not a shortfall. Every final playlist stayed above the `0.40` acceptance
+  bar (see the table below); pier-to-pier and final-playlist edges are different scales.
 
 **Which direction to move it:**
 - **Piers feel too characteristic of one artist, not the shared middle ground** → raise
