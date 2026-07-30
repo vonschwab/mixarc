@@ -336,7 +336,7 @@ def test_two_groups_double_the_budget_within_the_segment_floor():
 
 
 def test_budget_never_drops_below_one_per_group():
-    assert total_pier_budget(6, 0.125, 4) >= 4
+    assert total_pier_budget(6, 0.125, 4) == 4
 
 
 def test_allocation_is_even_with_remainder_to_the_first_chip():
@@ -655,3 +655,52 @@ def test_orchestrator_reports_low_overlap():
     # free-text sentence -- check the fields the renderer actually reads.
     assert any("middle ground" in str(r).lower() or "affinity" in str(r).lower()
                for r in out.relaxations)
+
+
+def _joint_only_bundle():
+    """B has an exclusive catalog; A is credited ONLY jointly with B -- the
+    real-library shape final-review Finding 1 protects (e.g. the real
+    library's "John Foxx and Harold Budd" dominating a thin Foxx solo
+    catalog). Reuses _blend_bundle's A/B sonic layout, but every "A" row is
+    relabeled to the joint credit "A and B" instead of a solo "A" row -- A
+    never appears alone anywhere in this library."""
+    artists = ["B"] * 5 + ["A and B"] * 5
+    sonic = [
+        [0.0, 1.0], [0.05, 0.95], [0.1, 0.9], [0.15, 0.85], [0.6, 0.5],   # B
+        [1.0, 0.0], [0.95, 0.05], [0.9, 0.1], [0.85, 0.15], [0.5, 0.6],   # joint (A and B)
+    ]
+    b = _sonic_bundle(artists, sonic)
+    b.durations_ms = np.full(len(artists), 240000, dtype=float)
+    return b
+
+
+def test_joint_only_chip_still_blends_and_is_blocked():
+    """Final-review Finding 1: a chip credited ONLY jointly with the other
+    chip (no solo catalog at all) must not silently collapse the blend to
+    single-artist mode. groups = [B(exclusive), Joint(A&B)] is 2 real,
+    pier-producing groups -- the old `len(exclusive) < 2` gate (`exclusive`
+    counted only [B]) wrongly returned None here with nothing dropped and
+    nothing to explain to the user. It must now proceed, actually seat a
+    joint-group pier, and block BOTH named artists from bridge interiors:
+    `_blocked_artist_keys` used to also be called with `exclusive`, so A's
+    key never reached the block set and A's own tracks could have seated as
+    bridge filler inside its own blend."""
+    from src.string_utils import normalize_artist_key
+
+    b = _joint_only_bundle()
+    out = select_multi_artist_piers(
+        bundle=b, artist_names=["A", "B"],
+        style_cfg=ArtistStyleConfig(enabled=True, pier_bridgeability_enabled=False),
+        ma_cfg=MultiArtistConfig(), track_count=15, max_artist_fraction=0.125,
+    )
+    assert isinstance(out, MultiArtistPiers), "must produce a blend, not collapse to None"
+    joint = next((g for g in out.groups if g.is_joint), None)
+    assert joint is not None, "the joint group must survive partition"
+    assert any(m in set(joint.indices) for m in out.ordered_medoids), (
+        "the joint group must actually seat at least one pier, not just "
+        "survive partition"
+    )
+    assert normalize_artist_key("A") in out.blocked_artist_keys, (
+        "the joint-only artist must still be blocked from bridge interiors"
+    )
+    assert normalize_artist_key("B") in out.blocked_artist_keys

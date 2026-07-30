@@ -496,8 +496,17 @@ class MultiArtistPiers:
     blocked_artist_keys: frozenset
 
 
-def _blocked_artist_keys(exclusive: Sequence[ArtistGroup]) -> frozenset:
-    """Artist keys for every exclusive (non-joint) group, resolved through aliases.
+def _blocked_artist_keys(groups: Sequence[ArtistGroup]) -> frozenset:
+    """Artist keys for every CHIP artist, resolved through aliases.
+
+    An exclusive group's ``label`` IS an artist key candidate. A joint
+    group's ``label`` is a composite display string (e.g. ``"A & B"``) and is
+    NOT an artist key -- its ``source_artists`` tuple holds the real chip
+    names. Both must be walked: a chip credited ONLY jointly with another
+    chip (no solo catalog at all -- e.g. the real library's "John Foxx"
+    alongside "John Foxx and Harold Budd") has no exclusive group of its own,
+    so reading only exclusive groups here would let that chip's tracks seat
+    as bridge-interior filler inside its own blend (review Finding 1).
 
     Becomes pier_bridge_builder._derive_seed_artist_keys's ``override``, which
     does ``frozenset(str(k) for k in override if k)`` -- handing it a bare
@@ -509,8 +518,15 @@ def _blocked_artist_keys(exclusive: Sequence[ArtistGroup]) -> frozenset:
     from src.string_utils import normalize_artist_key
     from src.playlist.artist_aliases import resolve_alias
 
+    chip_names: List[str] = []
+    for g in groups:
+        if g.is_joint:
+            chip_names.extend(g.source_artists)
+        else:
+            chip_names.append(g.label)
+
     return frozenset(
-        resolve_alias(normalize_artist_key(g.label)) for g in exclusive
+        resolve_alias(normalize_artist_key(n)) for n in chip_names
     )
 
 
@@ -619,8 +635,22 @@ def select_multi_artist_piers(
             "severity": "info",
         })
 
-    exclusive = [g for g in groups if not g.is_joint]
-    if len(exclusive) < 2:
+    # Chip names actually represented in the pairing -- either via an
+    # exclusive group or (a chip with no solo catalog at all) via the joint
+    # group's source_artists. Used below for user-facing text describing the
+    # whole pairing; a joint group's own `label` is a composite ("A & B"),
+    # not a chip name, so it cannot be used directly for that purpose.
+    present_names = [n for n in dict.fromkeys(names) if n not in dropped]
+
+    # Gate on the number of PIER-PRODUCING groups, not the number of
+    # exclusive groups (review Finding 1). A chip credited ONLY jointly with
+    # another chip (no solo catalog at all -- e.g. the real library's "John
+    # Foxx and Harold Budd" alongside a thin Foxx solo catalog) contributes
+    # no exclusive group, but its joint group is a real, pier-producing
+    # group: `groups = [OtherArtist(exclusive), Joint(both)]` is a genuine
+    # 2-group blend and must proceed, not silently collapse to the
+    # single-artist path with nothing dropped and nothing to explain.
+    if len(groups) < 2:
         if relaxations:
             # Fewer than two groups survived BECAUSE a requested name was
             # dropped (no usable tracks) -- not because the caller only ever
@@ -632,19 +662,24 @@ def select_multi_artist_piers(
             # caller's existing MultiArtistBlendFailed handler surfaces it
             # and falls back to single-artist generation, exactly as it
             # already does for the every-group-failed-to-cluster case.
+            #
+            # This branch can only be reached with 0 or 1 surviving groups,
+            # and a joint group can never exist alone (it requires 2
+            # contributing chips) -- so the lone survivor here, if any, is
+            # always exclusive.
             logger.warning(
                 "Multi-artist: only %d of %d requested artist(s) survived "
                 "partition (dropped: %s) — falling back to single-artist "
-                "generation.", len(exclusive), len(names), dropped,
+                "generation.", len(groups), len(names), dropped,
             )
             raise MultiArtistBlendFailed(
-                f"Multi-artist: only {len(exclusive)} of {len(names)} requested "
+                f"Multi-artist: only {len(groups)} of {len(names)} requested "
                 "artist(s) has usable tracks in your library.",
                 relaxations,
             )
         logger.info(
             "Multi-artist: only %d artist group(s) survived — falling back to the "
-            "single-artist path.", len(exclusive),
+            "single-artist path.", len(groups),
         )
         return None
 
@@ -800,7 +835,11 @@ def select_multi_artist_piers(
         if ordered else 0.0
     )
     if mean_affinity < ma_cfg.low_overlap_threshold:
-        bridge_label = " & ".join(g.label for g in exclusive)
+        # present_names (every chip actually in the pairing, exclusive or
+        # joint-only) rather than the exclusive groups' own labels -- a
+        # joint-only chip has no exclusive group and must not be dropped
+        # from this user-facing description of the pairing (Finding 1).
+        bridge_label = " & ".join(present_names)
         relaxations.append({
             "type": "relaxation",
             "scope": "multi_artist",
@@ -817,7 +856,7 @@ def select_multi_artist_piers(
             "middle.", bridge_label, mean_affinity,
         )
 
-    blocked = _blocked_artist_keys(exclusive)
+    blocked = _blocked_artist_keys(groups)
     assert all(isinstance(k, str) for k in blocked), (
         "blocked_artist_keys must contain only artist-key strings"
     )

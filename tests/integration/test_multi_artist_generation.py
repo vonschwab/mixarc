@@ -356,6 +356,8 @@ def _playlist_warnings(result) -> list:
 
 
 @_requires_artifact
+@pytest.mark.integration
+@pytest.mark.slow
 def test_eno_budd_seats_both_artists_and_the_joint_credit():
     r = _blend([ENO, BUDD])
     assert r is not None and len(r["tracks"]) > 0
@@ -368,6 +370,8 @@ def test_eno_budd_seats_both_artists_and_the_joint_credit():
 
 
 @_requires_artifact
+@pytest.mark.integration
+@pytest.mark.slow
 def test_eno_bowie_seats_both_without_a_joint_group():
     r = _blend([ENO, BOWIE])
     artists = _artists_in(r)
@@ -376,6 +380,8 @@ def test_eno_bowie_seats_both_without_a_joint_group():
 
 
 @_requires_artifact
+@pytest.mark.integration
+@pytest.mark.slow
 def test_blend_piers_lean_toward_the_other_artist():
     """The core claim: with the blend on, Eno's seated piers sit closer to Budd's
     prototype than Eno's piers from a SOLO Eno run do. Without this the feature
@@ -425,6 +431,8 @@ def test_blend_piers_lean_toward_the_other_artist():
 
 
 @_requires_artifact
+@pytest.mark.integration
+@pytest.mark.slow
 def test_worst_edge_stays_above_an_absolute_floor():
     """Principle 5: the worst edge defines the experience -- but a blend is NOT
     held to single-artist smoothness. A blend spans two artists' territory by
@@ -466,6 +474,8 @@ def test_worst_edge_stays_above_an_absolute_floor():
 
 
 @_requires_artifact
+@pytest.mark.integration
+@pytest.mark.slow
 def test_unresolvable_chip_still_generates_and_reports():
     r = _blend([ENO, "Definitely Not A Real Artist Xyzzy"])
     assert r is not None and len(r["tracks"]) > 0
