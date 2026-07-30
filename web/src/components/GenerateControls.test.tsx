@@ -128,3 +128,88 @@ describe("GenerateControls New Seeds button", () => {
     expect(secondCall.seed_epoch).toBe(2);
   });
 });
+
+describe("GenerateControls multi-artist blend", () => {
+  it("sends the artists list when a second artist chip is added", () => {
+    const onSubmit = vi.fn();
+    renderControls({ mode: "artist", onSubmit });
+
+    fireEvent.change(screen.getByPlaceholderText("Artist name…"), { target: { value: "Brian Eno" } });
+    fireEvent.click(screen.getByRole("button", { name: /add artist/i }));
+    fireEvent.change(screen.getByPlaceholderText(/second artist/i), { target: { value: "Harold Budd" } });
+    fireEvent.click(screen.getByRole("button", { name: /generate/i }));
+
+    const payload = onSubmit.mock.calls[0][0];
+    expect(payload.artist).toBe("Brian Eno");
+    expect(payload.artists).toEqual(["Brian Eno", "Harold Budd"]);
+  });
+
+  it("omits artists entirely for a single artist (wire payload unchanged)", () => {
+    const onSubmit = vi.fn();
+    renderControls({ mode: "artist", onSubmit });
+
+    fireEvent.change(screen.getByPlaceholderText("Artist name…"), { target: { value: "Brian Eno" } });
+    fireEvent.click(screen.getByRole("button", { name: /generate/i }));
+
+    const payload = onSubmit.mock.calls[0][0];
+    // JSON.stringify (api.generate) drops undefined-valued keys, so this
+    // matches the pre-feature wire payload byte-for-byte.
+    expect(payload.artists).toBeUndefined();
+  });
+
+  it("removing an extra artist chip drops it from the artists list", () => {
+    const onSubmit = vi.fn();
+    renderControls({ mode: "artist", onSubmit });
+
+    fireEvent.change(screen.getByPlaceholderText("Artist name…"), { target: { value: "Brian Eno" } });
+    fireEvent.click(screen.getByRole("button", { name: /add artist/i }));
+    fireEvent.change(screen.getByPlaceholderText(/second artist/i), { target: { value: "Harold Budd" } });
+    fireEvent.click(screen.getByRole("button", { name: /remove artist 2/i }));
+    fireEvent.click(screen.getByRole("button", { name: /generate/i }));
+
+    const payload = onSubmit.mock.calls[0][0];
+    expect(payload.artists).toBeUndefined();
+  });
+
+  it("blank extra-artist chips are stripped before sending", () => {
+    const onSubmit = vi.fn();
+    renderControls({ mode: "artist", onSubmit });
+
+    fireEvent.change(screen.getByPlaceholderText("Artist name…"), { target: { value: "Brian Eno" } });
+    fireEvent.click(screen.getByRole("button", { name: /add artist/i }));
+    fireEvent.change(screen.getByPlaceholderText(/second artist/i), { target: { value: "   " } });
+    fireEvent.click(screen.getByRole("button", { name: /generate/i }));
+
+    const payload = onSubmit.mock.calls[0][0];
+    expect(payload.artists).toBeUndefined();
+  });
+
+  it("clears extra artist chips when leaving artist mode", () => {
+    const { rerender } = renderControls({ mode: "artist" });
+    fireEvent.click(screen.getByRole("button", { name: /add artist/i }));
+    expect(screen.queryByPlaceholderText(/second artist/i)).not.toBeNull();
+
+    rerender(
+      <GenerateControls
+        mode="genre"
+        onModeChange={() => {}}
+        seedTrackIds={[]}
+        seedDisplays={[]}
+        onSubmit={() => {}}
+        busy={false}
+      />,
+    );
+    rerender(
+      <GenerateControls
+        mode="artist"
+        onModeChange={() => {}}
+        seedTrackIds={[]}
+        seedDisplays={[]}
+        onSubmit={() => {}}
+        busy={false}
+      />,
+    );
+
+    expect(screen.queryByPlaceholderText(/second artist/i)).toBeNull();
+  });
+});

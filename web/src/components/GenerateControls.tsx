@@ -113,6 +113,12 @@ export function GenerateControls({
   const [artistSpacing, setArtistSpacing] = useLocalStorage("pg_artist_spacing", "normal");
   const [diversityLevel, setDiversityLevel] = useLocalStorage("pg_diversity_level", 2);
 
+  // Multi-artist blend: `seed` is artist #1; these are chips for artist #2..N.
+  // Kept separate from the tag-chip reset effect below (which is keyed on
+  // [seed, mode] and fires on every keystroke) — resetting extras on every
+  // seed edit would erase what the user just typed into a chip.
+  const [extraArtists, setExtraArtists] = useLocalStorage<string[]>("pg_extra_artists", []);
+
   // Artist-mode Row 1 extras
   const [artistPresence, setArtistPresence] = useLocalStorage("pg_artist_presence", "medium");
   const [artistVariety, setArtistVariety] = useLocalStorage("pg_artist_variety", "balanced");
@@ -151,6 +157,14 @@ export function GenerateControls({
     setArtistTags([]);
     setTagsFetched(false);
   }, [seed, mode]);
+
+  // Reset extra-artist chips when leaving artist mode entirely — kept on a
+  // separate [mode]-only effect (see declaration above) so typing in `seed`
+  // never clears them.
+  useEffect(() => {
+    if (mode !== "artist") setExtraArtists([]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode]);
 
   // Fetch the confirmed artist's published genres. Re-runs on selection AND on tagEpoch
   // bumps (re-selecting the same name, or Style opened). Always resolves `tagsFetched` so
@@ -221,10 +235,16 @@ export function GenerateControls({
   const inputClassName = "w-full bg-well border border-border rounded text-xs text-text px-2.5 py-[3px]";
 
   function submit(epoch: number = seedEpoch) {
+    // Only non-blank extra chips count, and only in artist mode. Kept empty
+    // (=> `artists` omitted below, and JSON.stringify drops undefined keys)
+    // for the plain single-artist case so that request is byte-identical to
+    // before this feature existed.
+    const cleanedExtras = mode === "artist" ? extraArtists.map((a) => a.trim()).filter(Boolean) : [];
     const body: GenerateRequestBody = {
       mode,
       tracks,
       artist: mode === "artist" ? seed : undefined,
+      artists: cleanedExtras.length > 0 ? [seed.trim(), ...cleanedExtras] : undefined,
       genre: mode === "genre" ? seed : undefined,
       seed_tracks: mode === "seeds" ? seedDisplays : undefined,
       seed_track_ids: mode === "seeds" ? seedTrackIds : undefined,
@@ -274,40 +294,78 @@ export function GenerateControls({
         {/* Text input: artist mode — free-text with its own name autocomplete */}
         {mode === "artist" && (
           <Cell className="flex-1 min-w-[220px]">
-            <div ref={dropdownRef} className="relative w-full">
-              <input
-                data-testid="seed-input"
-                value={seed}
-                onChange={(e) => { selectedRef.current = null; setSeed(e.target.value); }}
-                onKeyDown={(e) => e.key === "Enter" && submit()}
-                placeholder="Artist name…"
-                className={inputClassName}
-              />
-              {artistSearch.items.length > 0 && (
-                <ul
-                  ref={listRef}
-                  onScroll={() => {
-                    const el = listRef.current;
-                    if (el && el.scrollHeight - el.scrollTop - el.clientHeight < 48) artistSearch.loadMore();
-                  }}
-                  className="absolute z-10 mt-1 w-full bg-panel border border-border rounded shadow-xl max-h-48 overflow-auto"
-                >
-                  {artistSearch.items.map((s) => (
-                    <li
-                      key={s}
-                      onClick={() => { selectedRef.current = s; setSeed(s); artistSearch.reset(); setTagEpoch((e) => e + 1); }}
-                      className="px-2.5 py-1.5 text-xs text-text hover:bg-rowsel cursor-pointer"
+            <div className="flex flex-col gap-1.5 w-full">
+              <div ref={dropdownRef} className="relative w-full">
+                <input
+                  data-testid="seed-input"
+                  value={seed}
+                  onChange={(e) => { selectedRef.current = null; setSeed(e.target.value); }}
+                  onKeyDown={(e) => e.key === "Enter" && submit()}
+                  placeholder="Artist name…"
+                  className={inputClassName}
+                />
+                {artistSearch.items.length > 0 && (
+                  <ul
+                    ref={listRef}
+                    onScroll={() => {
+                      const el = listRef.current;
+                      if (el && el.scrollHeight - el.scrollTop - el.clientHeight < 48) artistSearch.loadMore();
+                    }}
+                    className="absolute z-10 mt-1 w-full bg-panel border border-border rounded shadow-xl max-h-48 overflow-auto"
+                  >
+                    {artistSearch.items.map((s) => (
+                      <li
+                        key={s}
+                        onClick={() => { selectedRef.current = s; setSeed(s); artistSearch.reset(); setTagEpoch((e) => e + 1); }}
+                        className="px-2.5 py-1.5 text-xs text-text hover:bg-rowsel cursor-pointer"
+                      >
+                        {s}
+                      </li>
+                    ))}
+                    {(artistSearch.loading || artistSearch.hasMore) && (
+                      <li className="px-2.5 py-1.5 text-2xs text-faint">
+                        {artistSearch.loading ? "Loading…" : "Scroll for more"}
+                      </li>
+                    )}
+                  </ul>
+                )}
+              </div>
+
+              {/* Multi-artist blend: `seed` is artist #1; chips below add #2..N. */}
+              <div className="flex flex-wrap items-center gap-1.5">
+                {extraArtists.map((name, i) => (
+                  <span
+                    key={i}
+                    className="inline-flex items-center gap-1 rounded-full border border-border bg-well pl-2.5 pr-1 py-[3px]"
+                  >
+                    <input
+                      value={name}
+                      onChange={(e) =>
+                        setExtraArtists(extraArtists.map((v, j) => (j === i ? e.target.value : v)))
+                      }
+                      placeholder={i === 0 ? "Second artist…" : "Another artist…"}
+                      className="bg-transparent outline-none text-xs text-text w-28"
+                    />
+                    <button
+                      type="button"
+                      aria-label={`Remove artist ${i + 2}`}
+                      onClick={() => setExtraArtists(extraArtists.filter((_, j) => j !== i))}
+                      className="text-faint hover:text-text inline-flex items-center justify-center leading-none pointer-coarse:min-h-11 pointer-coarse:min-w-11"
                     >
-                      {s}
-                    </li>
-                  ))}
-                  {(artistSearch.loading || artistSearch.hasMore) && (
-                    <li className="px-2.5 py-1.5 text-2xs text-faint">
-                      {artistSearch.loading ? "Loading…" : "Scroll for more"}
-                    </li>
-                  )}
-                </ul>
-              )}
+                      ×
+                    </button>
+                  </span>
+                ))}
+                {extraArtists.length < 3 && (
+                  <button
+                    type="button"
+                    onClick={() => setExtraArtists([...extraArtists, ""])}
+                    className="text-xs text-faint hover:text-muted border border-dashed border-border rounded-full px-2.5 py-[3px] pointer-coarse:min-h-11"
+                  >
+                    + Add artist
+                  </button>
+                )}
+              </div>
             </div>
           </Cell>
         )}
