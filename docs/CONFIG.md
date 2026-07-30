@@ -341,8 +341,19 @@ candidates, it never gates or excludes, and a pairing with no shared ground stil
 | `genre_share` | `0.25` | Split within the overlap-affinity term — `(1 - genre_share)` MuQ cosine + `genre_share` dense-genre similarity. Sonic-dominant by default, consistent with genre being a nudge everywhere else in the engine. Renormalizes to pure-sonic (with a loud WARNING) if `X_genre_dense` is unavailable. |
 | `max_artists` | `4` | Ceiling on chips accepted; extra names are dropped with a WARNING naming them. Uncalibrated — revisit after listening to a 3+ chip blend. |
 | `joint_pier_min_budget` | `3` | Minimum total pier budget before the jointly-credited group (tracks credited to 2+ chips) is guaranteed a seat. Below this the joint group still exists but competes for surplus like any other group. |
-| `alternation_bonus` | `0.15` | Ordering preference for A/B/A/B pier sequencing — added per artist-change to the sonic path-cost score when choosing among candidate orderings. **Never an override**: any candidate whose worst edge is below the default walk's worst edge is discarded before scoring, so alternation cannot buy a tidy A/B/A/B pattern at the cost of a wrecked transition. Lower this if the worst-edge floor (see below) ever trips. |
 | `low_overlap_threshold` | `0.15` | Mean seated-pier affinity below this reports a relaxation notice ("these artists share little ground; piers stayed characteristic") — cosmetic only, never blocks generation. Placeholder pending a read of real affinity distributions across known-distant pairings. |
+
+**Pier ordering (2026-07-30 forced-interleaving rewrite).** `order_with_alternation` FORCES the
+theoretical maximum artist alternation the group sizes allow (not `n - 1` — a majority group forces
+`2*m - n - 1` repeats), picking the minimax-best order among those that reach it. There is no
+config key for this any more — `alternation_bonus` was a scored preference over a candidate set
+(`order_clusters`' own greedy walks) that structurally could never contain an interleaved order in
+the first place, so the bonus weight had nothing to buy; it is deleted, and a leftover value in
+config.yaml is caught and warned on loudly at startup
+(`src.playlist_gui.worker._RETIRED_MULTI_ARTIST_KEYS`). The ONE case alternation yields: if the best
+maximally-alternating order's worst edge falls below the absolute floor below, it falls back to the
+best-available order regardless of alternation and logs a WARNING naming both worst-edge values. See
+`PLAYLIST_ORDERING_TUNING.md` Knob 13 for the full mechanism and measured examples.
 
 **Pier budget.** Total piers for an N-group blend scale as `N * base` (each group gets a
 single-artist-equivalent share), clamped by `track_count // 5` so bridge segments stay long enough
@@ -360,13 +371,13 @@ successful blend, because the cap was sized for one seed artist while the blend 
 each group its own allocation.
 
 **Worst-edge acceptance bar.** A blend is not held to single-artist smoothness — it spans two
-artists' territory by design. The guard is an absolute `min_transition` floor of `0.40` (no config
-key; enforced in the acceptance test `test_worst_edge_stays_above_an_absolute_floor`), calibrated
-2026-07-30 from the acceptance test's three measured pairings at `track_count=30`: Eno+Budd 0.6135
-(0.623 on a later run), Eno+Bowie 0.5490, Budd+Foxx 0.6478. `0.40` sits well clear of ordinary blend
-roughness (~0.55) and well above this project's break-glass edge-repair trigger (`T < 0.30`). See
-`PLAYLIST_ORDERING_TUNING.md` Knob 13 for the full calibration table (including a later, independent
-Vegyn + Black Moth Super Rainbow measurement) and per-pairing `mean_affinity`.
+artists' territory by design. The guard is an absolute `min_transition` floor of `0.40`
+(`multi_artist.ABSOLUTE_MIN_TRANSITION_FLOOR` — no config key, but a single named constant shared by
+`order_with_alternation`'s own safety valve and the acceptance test
+`test_worst_edge_stays_above_an_absolute_floor`, so the two can never drift apart), well clear of
+ordinary blend roughness (~0.55) and well above this project's break-glass edge-repair trigger
+(`T < 0.30`). See `PLAYLIST_ORDERING_TUNING.md` Knob 13 for the full calibration table (re-measured
+2026-07-30 after the forced-interleaving rewrite) and per-pairing `mean_affinity`.
 
 **Known limitations.** Full detail, with measured examples, lives in
 `PLAYLIST_ORDERING_TUNING.md` Knob 13 — summary:
@@ -378,9 +389,11 @@ Vegyn + Black Moth Super Rainbow measurement) and per-pairing `mean_affinity`.
 - **A chameleon artist (diffuse catalog, low prototype cohesion) blends poorly, and the system
   says so** rather than silently producing a bad blend — see the Eno+Bowie example in the tuning
   doc.
-- **Pier interleaving (A/B/A/B) is a preference, not a guarantee** — `alternation_bonus` is floored
-  so it can never worsen the weakest transition, which means a pairing sometimes lands short of a
-  clean alternation.
+- **Pier interleaving (A/B/A/B) is FORCED to the theoretical maximum, with one safety valve.**
+  `order_with_alternation` computes the true max achievable alternation for the group sizes and
+  forces it; it only falls back to the best-available (possibly clumped) order when forcing would
+  push the pier-to-pier worst edge below the absolute floor above — see `PLAYLIST_ORDERING_TUNING.md`
+  Knob 13 for measured examples of both outcomes.
 
 ### Genre steering (`genre_steering_*`)
 

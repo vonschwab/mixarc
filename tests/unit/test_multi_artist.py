@@ -6,6 +6,8 @@ tests/integration/test_multi_artist_generation.py.
 """
 from __future__ import annotations
 
+import logging
+from collections import Counter
 from dataclasses import dataclass as _dc
 
 import numpy as np
@@ -13,11 +15,14 @@ import pytest
 
 from src.playlist.artist_style import ArtistStyleConfig, _select_k
 from src.playlist.multi_artist import (
+    ABSOLUTE_MIN_TRANSITION_FLOOR,
     ArtistGroup,
     MultiArtistBlendFailed,
     MultiArtistConfig,
     MultiArtistPiers,
     _blocked_artist_keys,
+    _enumerate_best_orders,
+    _max_achievable_alternation,
     allocate_pier_budget,
     group_genre_profiles,
     group_prototypes,
@@ -31,15 +36,23 @@ from src.playlist.multi_artist import (
 
 
 def test_config_defaults_are_live():
-    """The feature ships ON (principle 22); it is inert below two chips anyway."""
+    """The feature ships ON (principle 22); it is inert below two chips anyway.
+
+    ``alternation_bonus`` is no longer a field (2026-07-30 forced-interleaving
+    rewrite): alternation is a hard constraint in order_with_alternation now,
+    not a scored preference, so there is no bonus weight left to read. A
+    leftover ``multi_artist.alternation_bonus`` key in a user's config.yaml is
+    caught and warned on loudly by
+    src.playlist_gui.worker._RETIRED_MULTI_ARTIST_KEYS.
+    """
     cfg = multi_artist_config_from_ds({})
     assert cfg.enabled is True
     assert cfg.overlap_weight == pytest.approx(0.6)
     assert cfg.genre_share == pytest.approx(0.25)
     assert cfg.max_artists == 4
     assert cfg.joint_pier_min_budget == 3
-    assert cfg.alternation_bonus == pytest.approx(0.15)
     assert cfg.low_overlap_threshold == pytest.approx(0.15)
+    assert not hasattr(cfg, "alternation_bonus")
 
 
 def test_config_reads_overrides():
@@ -432,11 +445,49 @@ def test_joint_group_guaranteed_seat_survives_when_no_surplus_is_needed():
     assert sum(alloc.values()) == 6
 
 
-def test_alternation_prefers_the_interleaved_walk_when_sonic_cost_is_equal():
-    """Four piers on a symmetric square: A0 A1 B0 B1. Several greedy walks have
-    identical sonic cost (every edge is a 90-degree turn, cosine 0); the
-    minimum-edge floor (review finding 1) does not exclude any of them here, so
-    the alternating one must win outright, including the ``improved`` flag."""
+# ---------------------------------------------------------------------------
+# Forced-interleaving rewrite (2026-07-30, docs/superpowers/sdd/
+# 2026-07-29-multi-artist-blend/forced-interleaving-report.md). Alternation
+# used to be a scored PREFERENCE (`sonic path cost + alternation_bonus *
+# artist changes`) applied over order_clusters' own candidate set -- but
+# every candidate in that set was a greedy nearest-neighbor walk, which
+# structurally clumps same-artist piers, so no bonus weight could ever
+# produce a genuinely interleaved order (real repro: Vegyn + Black Moth Super
+# Rainbow, 6 piers, shipped 1/5 alternation with the old code). Alternation is
+# now a HARD CONSTRAINT: order_with_alternation computes the true maximum
+# achievable alternation for the actual group sizes and forces it, picking
+# the minimax-best order among those that reach it, with an absolute-floor
+# safety valve for the case forcing it would break a transition.
+#
+# Tests removed as part of this rewrite (documented, not silently dropped):
+#   - test_alternation_bonus_zero_reproduces_order_clusters: tested the
+#     alternation_bonus=0.0 "disable" escape hatch, which no longer exists --
+#     alternation is unconditional now (governed by group-size geometry, not
+#     a tunable weight).
+# ---------------------------------------------------------------------------
+
+
+def test_max_achievable_alternation_matches_the_closed_form():
+    """No majority group -> full alternation (n-1). A majority group forces
+    ``2*m - n - 1`` repeats, regardless of how the rest split across groups."""
+    assert _max_achievable_alternation([3, 3]) == 5       # full alternation
+    assert _max_achievable_alternation([4, 2]) == 4        # one forced repeat
+    assert _max_achievable_alternation([2, 2, 2]) == 5     # no majority -> full
+    assert _max_achievable_alternation([5, 1, 1]) == 4     # majority forces 2 repeats
+    assert _max_achievable_alternation([1]) == 0
+    assert _max_achievable_alternation([]) == 0
+
+
+def test_forced_alternation_reaches_the_theoretical_maximum_when_the_floor_allows():
+    """Four piers on a symmetric square: A0 A1 B0 B1 (0/90/180/270 degrees).
+    Every fully-alternating order on this geometry has worst edge -1.0 (the
+    two cross-group pairs are either 90 degrees apart, cos=0, or directly
+    opposite, cos=-1, and a length-4 alternating path can never avoid at
+    least one opposite pair) -- well below the real ABSOLUTE_MIN_TRANSITION_
+    FLOOR (0.40), so this test bypasses the floor (absolute_min_transition_
+    floor=-2.0) to isolate the forcing behavior itself; the floor's own
+    fallback is covered separately below.
+    """
     X = np.zeros((4, 2))
     X[0] = [1.0, 0.0]     # A0
     X[1] = [0.0, 1.0]     # A1
@@ -445,36 +496,72 @@ def test_alternation_prefers_the_interleaved_walk_when_sonic_cost_is_equal():
     X = X / np.linalg.norm(X, axis=1, keepdims=True)
     group_of = {0: "A", 1: "A", 2: "B", 3: "B"}
     ordered, improved = order_with_alternation(
-        [0, 1, 2, 3], X, group_of, alternation_bonus=0.15
+        [0, 1, 2, 3], X, group_of, absolute_min_transition_floor=-2.0,
     )
     labels = [group_of[i] for i in ordered]
     changes = sum(1 for a, b in zip(labels, labels[1:]) if a != b)
-    assert changes >= 2, f"expected an interleaved order, got {labels}"
+    assert changes == 3, f"expected full (3/3) alternation, got {changes}: {labels}"
     assert set(ordered) == {0, 1, 2, 3}, "ordering must be a permutation"
     assert improved is True, (
-        "the winner must differ from the default order_clusters walk here -- "
-        "all four candidate walks tie on sonic cost (every edge cosine is 0), "
-        "so the alternation bonus decides, and it must pick an interleaved one"
+        "the plain order_clusters default walk clumps (A0 A1 B0 B1, 1/3 "
+        "alternation) -- forcing the maximum must differ from it"
     )
 
 
-def test_alternation_never_regresses_the_worst_edge():
-    """Seeded random-search regression for review finding 1: the alternation
-    bonus is a SUM-based score, and a sum can trade one wrecked edge for
-    several slightly better ones -- exactly what design principle 5 ("the
-    worst edge defines the experience") forbids. A pre-fix audit at the
-    shipped default alternation_bonus=0.15 found this happening in ~6% of 500
-    random trials (e.g. default min edge 0.084 -> winner min edge -0.102).
-    The min-edge floor in order_with_alternation must make this impossible:
-    the winner's worst edge must never be below the default walk's worst edge.
+def test_absolute_floor_overrides_forced_alternation_and_warns(caplog):
+    """Same geometry as above, but with the REAL default floor (0.40): every
+    fully-alternating order's worst edge (-1.0) is genuinely broken, so the
+    safety valve must yield -- falling back to the best-available order (the
+    A0 A1 B0 B1 clump, worst edge 0.0) instead of shipping the forced
+    alternation, and logging a WARNING naming both numbers.
     """
-    from src.playlist.artist_style import order_clusters
+    X = np.zeros((4, 2))
+    X[0] = [1.0, 0.0]
+    X[1] = [0.0, 1.0]
+    X[2] = [-1.0, 0.0]
+    X[3] = [0.0, -1.0]
+    X = X / np.linalg.norm(X, axis=1, keepdims=True)
+    group_of = {0: "A", 1: "A", 2: "B", 3: "B"}
+    with caplog.at_level(logging.WARNING):
+        ordered, _improved = order_with_alternation([0, 1, 2, 3], X, group_of)
+    labels = [group_of[i] for i in ordered]
+    changes = sum(1 for a, b in zip(labels, labels[1:]) if a != b)
+    chosen_min = min(
+        float(np.dot(X[a], X[b])) for a, b in zip(ordered, ordered[1:])
+    )
+    assert changes < 3, (
+        f"forcing full alternation here breaks the floor -- must NOT be "
+        f"shipped, got {changes}/3: {labels}"
+    )
+    assert chosen_min == pytest.approx(0.0), (
+        f"expected the floor fallback to land on the best-available (0.0) "
+        f"worst edge, got {chosen_min:.4f}"
+    )
+    warnings = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(
+        "alternation yields" in m and "-1.0000" in m and "0.40" in m
+        for m in warnings
+    ), f"expected a WARNING naming both the rejected and floor values: {warnings}"
 
+
+def test_floor_safety_valve_rescues_to_the_best_available_order():
+    """Seeded random-search regression, rewritten for the new contract: the
+    OLD invariant ('winner never worse than the plain default walk') no
+    longer holds -- forcing alternation is EXPECTED to sometimes land a worse
+    worst edge than order_clusters' own greedy default now (that is the
+    entire point of this task; e.g. Eno+Budd goes from a 0.6135 clump to a
+    forced-alternation ~0.51-0.61 depending on geometry). What must still
+    hold: order_with_alternation never leaves a RESCUABLE order below
+    ABSOLUTE_MIN_TRANSITION_FLOOR -- whenever some order clears the floor, the
+    chosen one does too; when nothing can, the chosen one is still the best
+    available. ``_enumerate_best_orders`` (the same function order_with_
+    alternation itself uses for pier counts in this range) is the oracle for
+    "the best achievable, ignoring alternation" on each trial.
+    """
     rng = np.random.default_rng(12345)
-    trials = 500
-    regressions = 0
+    trials = 300
     for _ in range(trials):
-        n = int(rng.integers(4, 9))
+        n = int(rng.integers(4, 7))  # stays well inside the exact-enumeration cap
         dim = int(rng.integers(2, 6))
         X = rng.normal(size=(n, dim))
         X = X / np.linalg.norm(X, axis=1, keepdims=True)
@@ -482,43 +569,68 @@ def test_alternation_never_regresses_the_worst_edge():
         labels = rng.choice(["A", "B"], size=n)
         group_of = {i: str(labels[i]) for i in idx}
 
-        default = order_clusters(idx, X)
-        default_min = min(
-            float(np.dot(X[a], X[b])) for a, b in zip(default, default[1:])
+        counts = list(Counter(group_of[i] for i in idx).values())
+        max_alt = _max_achievable_alternation(counts)
+        _best_at_max, _best_at_max_min, _best_unconstrained, unconstrained_min = (
+            _enumerate_best_orders(idx, X, group_of, max_alt)
         )
-        ordered, _ = order_with_alternation(
-            idx, X, group_of, alternation_bonus=0.15
-        )
-        winner_min = min(
+
+        ordered, _ = order_with_alternation(idx, X, group_of)
+        chosen_min = min(
             float(np.dot(X[a], X[b])) for a, b in zip(ordered, ordered[1:])
         )
-        if winner_min < default_min - 1e-9:
-            regressions += 1
+        target = min(ABSOLUTE_MIN_TRANSITION_FLOOR, unconstrained_min)
+        assert chosen_min >= target - 1e-9, (
+            f"chosen worst edge {chosen_min:.4f} fell short of the achievable "
+            f"target {target:.4f} (floor={ABSOLUTE_MIN_TRANSITION_FLOOR}, "
+            f"unconstrained best={unconstrained_min:.4f})"
+        )
 
-    assert regressions == 0, (
-        f"{regressions}/{trials} seeded trials regressed the worst edge below "
-        "the default walk's floor -- the min-edge floor is not being applied"
-    )
 
-
-def test_alternation_bonus_zero_reproduces_order_clusters():
-    from src.playlist.artist_style import order_clusters
-    rng = np.random.default_rng(0)
-    X = rng.normal(size=(6, 4))
+def test_bounded_beam_path_still_forces_full_alternation_above_the_cap():
+    """Above _FULL_ENUMERATION_PIER_CAP (8 piers), order_with_alternation
+    switches to the bounded beam search -- this pins that it still reaches
+    the true theoretical max alternation (not merely 'close enough') for a
+    group-size split with no majority (4+3+3 of 10 -- 4 <= 10/2), where full
+    alternation is achievable.
+    """
+    rng = np.random.default_rng(7)
+    n = 10
+    X = rng.normal(size=(n, 4))
     X = X / np.linalg.norm(X, axis=1, keepdims=True)
-    group_of = {0: "A", 1: "A", 2: "A", 3: "B", 4: "B", 5: "B"}
-    ordered, improved = order_with_alternation(
-        [0, 1, 2, 3, 4, 5], X, group_of, alternation_bonus=0.0
+    idx = list(range(n))
+    label_list = ["A"] * 4 + ["B"] * 3 + ["C"] * 3
+    group_of = {i: label_list[i] for i in idx}
+
+    ordered, _ = order_with_alternation(
+        idx, X, group_of, absolute_min_transition_floor=-2.0,
     )
-    assert ordered == order_clusters([0, 1, 2, 3, 4, 5], X)
-    assert improved is False
+    assert set(ordered) == set(idx), "must remain a permutation"
+    labels = [group_of[i] for i in ordered]
+    changes = sum(1 for a, b in zip(labels, labels[1:]) if a != b)
+    assert changes == 9, f"expected full alternation (9/9), got {changes}: {labels}"
+
+
+def test_logs_alternation_summary_at_info(caplog):
+    """Requirement: log what happened on every call, not just the fallback
+    case -- achieved alternation vs the theoretical max, the chosen order's
+    worst edge, and the unconstrained-best worst edge."""
+    X = np.eye(4)
+    group_of = {0: "A", 1: "A", 2: "B", 3: "B"}
+    with caplog.at_level(logging.INFO):
+        order_with_alternation([0, 1, 2, 3], X, group_of)
+    assert any(
+        "Multi-artist ordering: alternation" in r.message
+        and "theoretical max" in r.message
+        for r in caplog.records
+    ), f"expected an INFO summary line on every call: {[r.message for r in caplog.records]}"
 
 
 def test_ordering_is_a_permutation_and_handles_degenerate_input():
     X = np.eye(3)
     group_of = {0: "A", 1: "B", 2: "A"}
-    assert order_with_alternation([], X, group_of, alternation_bonus=0.15) == ([], False)
-    single, improved = order_with_alternation([1], X, group_of, alternation_bonus=0.15)
+    assert order_with_alternation([], X, group_of) == ([], False)
+    single, improved = order_with_alternation([1], X, group_of)
     assert single == [1] and improved is False
 
 

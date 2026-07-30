@@ -29,6 +29,7 @@ import pytest
 from src.features.artifacts import load_artifact_bundle
 from src.playlist.artist_style import _artist_indices_in_bundle
 from src.playlist.multi_artist import (
+    ABSOLUTE_MIN_TRANSITION_FLOOR,
     ArtistGroup,
     MultiArtistBlendFailed,
     MultiArtistPiers,
@@ -460,9 +461,15 @@ def test_worst_edge_stays_above_an_absolute_floor():
     between the two: well clear of ordinary run-to-run variation around 0.55,
     and well above the point where the pipeline's own repair logic would
     already consider the edge broken.
-    """
-    ABSOLUTE_MIN_TRANSITION_FLOOR = 0.40
 
+    2026-07-30 (forced-interleaving rewrite): this same value is now also the
+    live absolute-floor safety valve INSIDE order_with_alternation itself
+    (src.playlist.multi_artist.ABSOLUTE_MIN_TRANSITION_FLOOR, imported above
+    rather than redefined here) -- forcing pier alternation falls back to the
+    best-available order whenever it would otherwise breach this floor, so
+    this test and that safety valve are now pinned to the same number by
+    construction, not just by convention.
+    """
     for names in ([ENO, BUDD], [ENO, BOWIE], [BUDD, FOXX]):
         blend = _blend(names)
         blend_min = _min_transition(blend)

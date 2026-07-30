@@ -523,6 +523,20 @@ _RETIRED_ARTIST_STYLE_KEYS = {
     "pool_balance_mode": "build_balanced_candidate_pool deleted (corridor Phase 1 Task 8); pool_balance_mode's only non-default value (proportional_capped) was never implemented anyway",
 }
 
+# playlists.ds_pipeline.multi_artist.alternation_bonus: forced-interleaving
+# rewrite (2026-07-30, docs/superpowers/sdd/2026-07-29-multi-artist-blend/
+# forced-interleaving-report.md). order_with_alternation used to score
+# candidate orders with `sonic path cost + alternation_bonus * artist
+# changes` -- but every candidate came from order_clusters' own greedy
+# nearest-neighbor walk, which structurally clumps same-artist piers, so no
+# amount of bonus weight could ever produce an interleaved order. Alternation
+# is now a hard constraint (the maximum achievable alternation for the actual
+# group sizes is computed and forced, then the minimax-best order among those
+# is picked) -- there is no bonus weight left to tune.
+_RETIRED_MULTI_ARTIST_KEYS = {
+    "alternation_bonus": "order_with_alternation forces the maximum achievable alternation now (forced-interleaving rewrite, 2026-07-30); alternation is a hard constraint, not a scored bonus, so there is no weight left to tune",
+}
+
 _WARNED_RETIRED_KEYS: set[str] = set()  # per-process dedup (final-review finding, corridor Phase 0)
 
 
@@ -602,6 +616,9 @@ def _warn_retired_keys(config: Dict[str, Any]) -> list[str]:
 
     artist_style = ds_pipeline.get("artist_style") or {}
     _warn_retired_section(artist_style, "artist_style", _RETIRED_ARTIST_STYLE_KEYS, found)
+
+    multi_artist = ds_pipeline.get("multi_artist") or {}
+    _warn_retired_section(multi_artist, "multi_artist", _RETIRED_MULTI_ARTIST_KEYS, found)
 
     return found
 

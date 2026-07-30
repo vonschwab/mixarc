@@ -2327,8 +2327,9 @@ class PlaylistGenerator:
                     # _cap_order / explicit reorder_avoiding_low_support_terminal
                     # calls, using the SAME shared function, so a blend cannot
                     # seat a sonic-outlier pier in the closing seat just because
-                    # order_with_alternation (sonic path cost + alternation only)
-                    # has no notion of within-artist support.
+                    # order_with_alternation (forced max alternation + minimax
+                    # sonic edge, 2026-07-30) has no notion of within-artist
+                    # support.
                     if style_cfg.pier_support_terminal_avoidance and _ma_piers.support_by_index:
                         _ma_xraw = np.asarray(getattr(bundle, "X_sonic"), dtype=float)
                         _ma_xnorm = _ma_xraw / (np.linalg.norm(_ma_xraw, axis=1, keepdims=True) + 1e-12)
