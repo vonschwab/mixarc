@@ -308,3 +308,142 @@ def test_disabled_config_warns_loudly_and_generates_from_first_artist(caplog):
     assert any(
         "multi_artist.enabled is false" in r.message for r in caplog.records
     ), "disabled-config path did not warn loudly"
+
+
+# ---------------------------------------------------------------------------
+# Task 13: live acceptance. No monkeypatching of select_multi_artist_piers --
+# these drive the real clustering/budget/ordering math against the real
+# artifact + DB, through create_playlist_for_artist exactly as the GUI would
+# call it (via _artist_generator, the same GUI-fidelity config resolution the
+# rest of this file already uses -- a bare Config("config.yaml") would skip
+# the derive_runtime_config -> merge_overrides -> load_config_with_overrides
+# chain and could silently diverge from production, per this file's own
+# import of _artist_generator from test_gui_fidelity_regressions).
+#
+# create_playlist_for_artist's result dict has no top-level "metrics" or
+# "relaxations" key -- both live under "ds_report" (== self._last_ds_report):
+# "ds_report"."metrics"."min_transition" and
+# "ds_report"."playlist_stats"."playlist"."warnings" (see
+# test_blend_failed_outcome_surfaces_relaxations_and_falls_back above, which
+# already reads warnings this way).
+# ---------------------------------------------------------------------------
+
+
+def _blend(names, track_count=30):
+    return _artist_generator([]).create_playlist_for_artist(
+        artist_name=names[0], artist_names=list(names),
+        track_count=track_count, random_seed=0,
+    )
+
+
+def _artists_in(result):
+    return [str(t.get("artist") or "") for t in result["tracks"]]
+
+
+def _min_transition(result) -> float:
+    return float((result.get("ds_report") or {}).get("metrics", {}).get("min_transition"))
+
+
+def _playlist_warnings(result) -> list:
+    return (
+        (result.get("ds_report") or {})
+        .get("playlist_stats", {})
+        .get("playlist", {})
+        .get("warnings")
+        or []
+    )
+
+
+@_requires_artifact
+def test_eno_budd_seats_both_artists_and_the_joint_credit():
+    r = _blend([ENO, BUDD])
+    assert r is not None and len(r["tracks"]) > 0
+    artists = _artists_in(r)
+    assert any(ENO in a for a in artists), f"no {ENO} track: {set(artists)}"
+    assert any(BUDD in a for a in artists), f"no {BUDD} track: {set(artists)}"
+    # the joint credit exists in the library (21 tracks) and should be reachable
+    assert any("Harold Budd and Brian Eno" in a for a in artists), \
+        f"the jointly-credited group was never seated: {set(artists)}"
+
+
+@_requires_artifact
+def test_eno_bowie_seats_both_without_a_joint_group():
+    r = _blend([ENO, BOWIE])
+    artists = _artists_in(r)
+    assert any(ENO in a for a in artists)
+    assert any(BOWIE in a for a in artists)
+
+
+@_requires_artifact
+def test_blend_piers_lean_toward_the_other_artist():
+    """The core claim: with the blend on, Eno's seated piers sit closer to Budd's
+    prototype than Eno's piers from a SOLO Eno run do. Without this the feature
+    is decorative.
+
+    ``blend["tracks"]`` (not just the piers) is filtered to Eno rows because
+    ``disallow_pier_artists_in_interiors`` (config.yaml, on by default) keeps a
+    seed artist out of bridge interiors -- with both Eno and Budd blocked as
+    seed artists, every Eno row surviving in the final playlist IS an Eno pier.
+    """
+    import numpy as np
+
+    from src.playlist.multi_artist import group_prototypes, partition_artist_groups
+    from src.playlist.tag_steering import sonic_global_mean
+
+    bundle = load_artifact_bundle(str(ART), sonic_variant_override="muq")
+    groups, _dropped = partition_artist_groups(bundle, [ENO, BUDD])
+    protos = group_prototypes(bundle, groups)
+    budd_proto = protos[BUDD]
+
+    X = np.asarray(bundle.X_sonic, dtype=float)
+    gmean = sonic_global_mean(X)
+    row_of = bundle.track_id_to_index
+
+    def mean_pull(track_ids, artist_substr):
+        rows = [
+            row_of[str(t)] for t in track_ids
+            if str(t) in row_of
+            and artist_substr in str(bundle.track_artists[row_of[str(t)]])
+        ]
+        if not rows:
+            return None
+        M = X[rows] / (np.linalg.norm(X[rows], axis=1, keepdims=True) + 1e-12)
+        return float(np.mean((M - gmean) @ budd_proto))
+
+    solo_piers = _select_piers(ENO, [])
+    blend = _blend([ENO, BUDD])
+    blend_piers = [str(t.get("rating_key")) for t in blend["tracks"]]
+
+    solo_pull = mean_pull(solo_piers, "Eno")
+    blend_pull = mean_pull(blend_piers, "Eno")
+    assert solo_pull is not None and blend_pull is not None
+    assert blend_pull > solo_pull, (
+        f"blend did not pull Eno toward Budd: solo={solo_pull:.4f} "
+        f"blend={blend_pull:.4f}"
+    )
+
+
+@_requires_artifact
+def test_worst_edge_is_not_sacrificed_for_alternation():
+    """Principle 5: the worst edge defines the experience. A blend's min
+    transition must not fall below the weaker of the two solo playlists."""
+    solo_a = _artist_generator([]).create_playlist_for_artist(
+        artist_name=ENO, track_count=30, random_seed=0)
+    solo_b = _artist_generator([]).create_playlist_for_artist(
+        artist_name=BUDD, track_count=30, random_seed=0)
+    blend = _blend([ENO, BUDD])
+
+    floor = min(_min_transition(solo_a), _min_transition(solo_b))
+    blend_min = _min_transition(blend)
+    assert blend_min >= floor - 0.02, (
+        f"blend worst edge {blend_min:.4f} fell below the solo floor {floor:.4f} "
+        "— lower alternation_bonus rather than relaxing this guard"
+    )
+
+
+@_requires_artifact
+def test_unresolvable_chip_still_generates_and_reports():
+    r = _blend([ENO, "Definitely Not A Real Artist Xyzzy"])
+    assert r is not None and len(r["tracks"]) > 0
+    blob = str(_playlist_warnings(r))
+    assert "Xyzzy" in blob, f"the dropped chip was not reported: {blob}"

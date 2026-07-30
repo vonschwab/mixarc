@@ -506,16 +506,26 @@ def _blocked_artist_keys(exclusive: Sequence[ArtistGroup]) -> frozenset:
 
 
 class MultiArtistBlendFailed(RuntimeError):
-    """>=2 groups survived partition, but every one was too thin to cluster.
+    """A real multi-artist attempt failed and there is something to explain.
 
-    Distinct from ``select_multi_artist_piers`` returning ``None`` (fewer than
-    two groups survived partition -- nothing to explain, the caller silently
-    runs the single-artist path). This is a real attempt that failed, and the
-    relaxations already collected (dropped chips, per-group thin-cluster
-    failures) must not vanish with it -- see the Finding 2 discussion in
-    task-9-report.md. Callers should catch this, fold ``.relaxations`` into
-    whatever they show the user, and then fall back to single-artist
-    generation exactly as they would for a ``None`` return.
+    Two distinct situations raise this, both carrying relaxations that must
+    not vanish into a bare ``None`` return (Task 13 acceptance testing found
+    the second situation was still falling through to a silent ``None`` --
+    see task-13-report.md):
+
+    1. >=2 groups survived partition, but every one was too thin to cluster
+       (see the Finding 2 discussion in task-9-report.md).
+    2. Fewer than two groups survived partition BECAUSE a requested name was
+       dropped (no usable tracks) -- as opposed to the caller simply never
+       having asked for a second artist, which has nothing to explain and
+       still returns ``None``.
+
+    Distinct from ``select_multi_artist_piers`` returning bare ``None``
+    (nothing was ever dropped or attempted -- the caller silently runs the
+    single-artist path with nothing to show the user). Callers should catch
+    this, fold ``.relaxations`` into whatever they show the user, and then
+    fall back to single-artist generation exactly as they would for a
+    ``None`` return.
     """
 
     def __init__(self, message: str, relaxations: List[Dict[str, Any]]):
@@ -538,17 +548,25 @@ def select_multi_artist_piers(
 ) -> Optional[MultiArtistPiers]:
     """Pick and order the piers for a 2+ artist blend.
 
-    Returns None when fewer than two groups survive partition -- the caller
-    then runs the normal single-artist path unchanged, with nothing to explain.
+    Returns None when fewer than two groups survive partition AND nothing was
+    dropped to cause it -- e.g. the caller only ever named one artist. There
+    is genuinely nothing to explain, so the caller runs the normal
+    single-artist path unchanged.
 
-    Raises MultiArtistBlendFailed when two or more groups DID survive
-    partition but every one of them was too thin to cluster (e.g. two obscure
-    chips with 1-2 tracks each and no joint catalog) -- a real attempt that
-    produced zero piers. That is a different situation from "no attempt was
-    made" and must not be silently folded into the same None return (it would
-    discard the dropped-chip / thin-group relaxations already collected and
-    violate the never-fail-on-soft-axes rule: the user must still learn why
-    their blend didn't happen). See task-9-report.md, Finding 2.
+    Raises MultiArtistBlendFailed in two situations, both real attempts that
+    produced zero piers and must not be silently folded into the same None
+    return (that would discard the relaxations already collected and violate
+    the never-fail-on-soft-axes rule: the user must still learn why their
+    blend didn't happen):
+      1. Two or more groups DID survive partition but every one of them was
+         too thin to cluster (e.g. two obscure chips with 1-2 tracks each and
+         no joint catalog). See task-9-report.md, Finding 2.
+      2. Fewer than two groups survived partition BECAUSE a requested name
+         had zero usable tracks and was dropped -- e.g. a typo'd or absent
+         artist name collapses a 2-artist request down to 1 survivor. Found
+         by Task 13 live acceptance testing (task-13-report.md): the original
+         Finding-2 fix only covered outcome 1, so this path still returned a
+         bare None and silently swallowed the drop notice.
 
     Raises ValueError immediately, before any group is touched, if the
     artifact itself is missing artist_keys or X_sonic -- that is a data
@@ -594,6 +612,27 @@ def select_multi_artist_piers(
 
     exclusive = [g for g in groups if not g.is_joint]
     if len(exclusive) < 2:
+        if relaxations:
+            # Fewer than two groups survived BECAUSE a requested name was
+            # dropped (no usable tracks) -- not because the caller only ever
+            # asked for one artist. That drop notice must not vanish with a
+            # bare None return (the same silent-discard failure mode Finding
+            # 2 fixed for the "every group too thin to cluster" case above):
+            # a user who typo'd or picked an absent artist deserves to know
+            # why their blend became a single-artist playlist. Raise so the
+            # caller's existing MultiArtistBlendFailed handler surfaces it
+            # and falls back to single-artist generation, exactly as it
+            # already does for the every-group-failed-to-cluster case.
+            logger.warning(
+                "Multi-artist: only %d of %d requested artist(s) survived "
+                "partition (dropped: %s) — falling back to single-artist "
+                "generation.", len(exclusive), len(names), dropped,
+            )
+            raise MultiArtistBlendFailed(
+                f"Multi-artist: only {len(exclusive)} of {len(names)} requested "
+                "artist(s) has usable tracks in your library.",
+                relaxations,
+            )
         logger.info(
             "Multi-artist: only %d artist group(s) survived — falling back to the "
             "single-artist path.", len(exclusive),
