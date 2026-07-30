@@ -11,8 +11,11 @@ from dataclasses import dataclass as _dc
 import numpy as np
 import pytest
 
+from src.playlist.artist_style import ArtistStyleConfig
 from src.playlist.multi_artist import (
     ArtistGroup,
+    MultiArtistConfig,
+    MultiArtistPiers,
     allocate_pier_budget,
     group_genre_profiles,
     group_prototypes,
@@ -20,6 +23,7 @@ from src.playlist.multi_artist import (
     order_with_alternation,
     overlap_affinity,
     partition_artist_groups,
+    select_multi_artist_piers,
     total_pier_budget,
 )
 
@@ -508,3 +512,74 @@ def test_ordering_is_a_permutation_and_handles_degenerate_input():
     assert order_with_alternation([], X, group_of, alternation_bonus=0.15) == ([], False)
     single, improved = order_with_alternation([1], X, group_of, alternation_bonus=0.15)
     assert single == [1] and improved is False
+
+
+def _blend_bundle():
+    """12 tracks: 5 A, 5 B, 2 joint. A's index 4 and B's index 9 lean toward
+    the other side.
+
+    The orchestrator tests below pass ``pier_bridgeability_enabled=False`` --
+    that veto needs >= pier_bridgeability_k (10) same-library non-seed-artist
+    neighbors at a calibrated similarity floor before a candidate can seat as
+    a medoid, which no 12-row toy library can ever supply. Every other
+    small-fixture test in this suite (test_artist_style.py, test_tag_first_
+    piers.py) disables it the same way; it is exercised on its own terms
+    elsewhere and is orthogonal to what select_multi_artist_piers tests here."""
+    artists = (
+        ["A"] * 5 + ["B"] * 5 + ["A and B"] * 2
+    )
+    sonic = [
+        [1.0, 0.0], [0.95, 0.05], [0.9, 0.1], [0.85, 0.15], [0.5, 0.6],   # A
+        [0.0, 1.0], [0.05, 0.95], [0.1, 0.9], [0.15, 0.85], [0.6, 0.5],   # B
+        [0.7, 0.7], [0.72, 0.68],                                          # joint
+    ]
+    b = _sonic_bundle(artists, sonic)
+    b.durations_ms = np.full(len(artists), 240000, dtype=float)
+    return b
+
+
+def test_orchestrator_returns_none_below_two_groups():
+    b = _blend_bundle()
+    out = select_multi_artist_piers(
+        bundle=b, artist_names=["A"], style_cfg=ArtistStyleConfig(enabled=True, pier_bridgeability_enabled=False),
+        ma_cfg=MultiArtistConfig(), track_count=30, max_artist_fraction=0.125,
+    )
+    assert out is None, "one artist must fall back to the single-artist path"
+
+
+def test_orchestrator_seats_both_artists_and_the_joint_group():
+    b = _blend_bundle()
+    out = select_multi_artist_piers(
+        bundle=b, artist_names=["A", "B"], style_cfg=ArtistStyleConfig(enabled=True, pier_bridgeability_enabled=False),
+        ma_cfg=MultiArtistConfig(), track_count=30, max_artist_fraction=0.125,
+    )
+    assert isinstance(out, MultiArtistPiers)
+    assert len(out.ordered_medoids) >= 3
+    labels = {g.label for g in out.groups}
+    assert "A" in labels and "B" in labels
+    assert any(g.is_joint for g in out.groups)
+    # both named artists are blocked from interiors
+    assert len(out.blocked_artist_keys) >= 2
+
+
+def test_orchestrator_reports_a_dropped_chip():
+    b = _blend_bundle()
+    out = select_multi_artist_piers(
+        bundle=b, artist_names=["A", "B", "Nobody"],
+        style_cfg=ArtistStyleConfig(enabled=True, pier_bridgeability_enabled=False), ma_cfg=MultiArtistConfig(),
+        track_count=30, max_artist_fraction=0.125,
+    )
+    assert any("Nobody" in str(r) for r in out.relaxations), \
+        "a dropped chip must be reported to the user, not just logged"
+
+
+def test_orchestrator_reports_low_overlap():
+    b = _blend_bundle()
+    # Threshold above anything achievable -> always reports.
+    out = select_multi_artist_piers(
+        bundle=b, artist_names=["A", "B"], style_cfg=ArtistStyleConfig(enabled=True, pier_bridgeability_enabled=False),
+        ma_cfg=MultiArtistConfig(low_overlap_threshold=99.0),
+        track_count=30, max_artist_fraction=0.125,
+    )
+    assert any("share little" in str(r).lower() or "overlap" in str(r).lower()
+               for r in out.relaxations)

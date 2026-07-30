@@ -476,3 +476,208 @@ def order_with_alternation(
             _path_sonic_cost(best, X_norm),
         )
     return best, improved
+
+
+@dataclass
+class MultiArtistPiers:
+    ordered_medoids: List[int]
+    relaxations: List[Dict[str, Any]]
+    groups: List[ArtistGroup]
+    mean_affinity: float
+    blocked_artist_keys: frozenset
+
+
+def select_multi_artist_piers(
+    *,
+    bundle,
+    artist_names: Sequence[str],
+    style_cfg,
+    ma_cfg: MultiArtistConfig,
+    track_count: int,
+    max_artist_fraction: float,
+    random_seed: int = 0,
+    include_collaborations: bool = False,
+    excluded_track_ids: Optional[set] = None,
+    metadata_db_path: Optional[str] = None,
+) -> Optional[MultiArtistPiers]:
+    """Pick and order the piers for a 2+ artist blend.
+
+    Returns None when fewer than two groups survive -- the caller then runs the
+    normal single-artist path unchanged.
+
+    Relaxation entries mirror the shape pier_bridge_builder already emits for the
+    ``RelaxationNotice`` component (``web/src/lib/types.ts::RelaxationEntry``):
+    ``{"type": "relaxation", "scope": ..., "bridge": str, "relaxed": [str, ...],
+    "severity": str}``. ``bridge`` and ``relaxed`` are rendered verbatim as
+    "Relaxed to fit: {bridge} — dropped {', '.join(relaxed)}"; there is no
+    separate free-text "detail" field in the real renderer.
+    """
+    import math
+
+    from src.playlist.artist_style import cluster_artist_tracks
+    from src.string_utils import normalize_artist_key
+    from src.playlist.artist_aliases import resolve_alias
+
+    names = [str(a).strip() for a in artist_names if str(a).strip()]
+    if len(names) > ma_cfg.max_artists:
+        logger.warning(
+            "Multi-artist: %d artists requested, capping at max_artists=%d (%s dropped)",
+            len(names), ma_cfg.max_artists, names[ma_cfg.max_artists:],
+        )
+        names = names[: ma_cfg.max_artists]
+
+    relaxations: List[Dict[str, Any]] = []
+    groups, dropped = partition_artist_groups(
+        bundle, names,
+        include_collaborations=include_collaborations,
+        excluded_track_ids=excluded_track_ids,
+    )
+    for name in dropped:
+        relaxations.append({
+            "type": "relaxation",
+            "scope": "multi_artist",
+            "bridge": "the artist pairing",
+            "relaxed": [f"{name} (no usable tracks in your library)"],
+            "severity": "info",
+        })
+
+    exclusive = [g for g in groups if not g.is_joint]
+    if len(exclusive) < 2:
+        logger.info(
+            "Multi-artist: only %d artist group(s) survived — falling back to the "
+            "single-artist path.", len(exclusive),
+        )
+        return None
+
+    protos = group_prototypes(bundle, groups)
+    genre_profiles = group_genre_profiles(bundle, groups)
+
+    total = total_pier_budget(track_count, max_artist_fraction, len(groups))
+    alloc = allocate_pier_budget(
+        groups, total, joint_pier_min_budget=ma_cfg.joint_pier_min_budget,
+    )
+    logger.info(
+        "Multi-artist pier budget: total=%d allocation=%s (track_count=%d, "
+        "max_artist_fraction=%.3f)", total, alloc, track_count, max_artist_fraction,
+    )
+
+    all_medoids: List[int] = []
+    group_of_index: Dict[int, str] = {}
+    affinity_by_index: Dict[int, float] = {}
+    X_norm_shared: Optional[np.ndarray] = None
+
+    for g in groups:
+        want = int(alloc.get(g.label, 0))
+        if want <= 0:
+            continue
+        # A group thinner than the clustering floor (cluster_k_min, e.g. a joint
+        # group with only 1-2 tracks) cannot be clustered -- cluster_artist_tracks
+        # raises ValueError rather than degrading. That is correct for the
+        # single-artist path (an artist with 2 tracks genuinely cannot seed a
+        # playlist), but here it is one contributor among several groups: the
+        # right behavior is to drop this group's contribution and keep going
+        # (design principle 25, "edge cases get graceful fallbacks"), not to
+        # crash the whole blend over one thin corner (most often the joint set).
+        aff = overlap_affinity(
+            bundle, g, groups, protos, genre_profiles, genre_share=ma_cfg.genre_share,
+        )
+        k_predict = max(1, min(int(style_cfg.cluster_k_max), len(g.indices)))
+        try:
+            clusters, medoids, _by_cluster, X_norm, _support = cluster_artist_tracks(
+                bundle=bundle,
+                artist_name=g.label,
+                cfg=style_cfg,
+                random_seed=int(random_seed),
+                medoid_top_k=max(1, math.ceil(want / k_predict)),
+                include_collaborations=include_collaborations,
+                metadata_db_path=metadata_db_path,
+                target_pier_count=want,
+                member_indices=list(g.indices),
+                overlap_affinity=aff,
+                overlap_weight=ma_cfg.overlap_weight,
+            )
+        except ValueError as exc:
+            logger.warning(
+                "Multi-artist: '%s' (%d track(s)) could not be clustered (%s) — "
+                "contributes no piers.", g.label, len(g.indices), exc,
+            )
+            relaxations.append({
+                "type": "relaxation",
+                "scope": "multi_artist",
+                "bridge": f"{g.label}'s pier budget",
+                "relaxed": [
+                    f"{g.label} ({len(g.indices)} track(s) — too few to cluster)"
+                ],
+                "severity": "info",
+            })
+            continue
+        X_norm_shared = X_norm
+        chosen = list(medoids)[:want]
+        for m in chosen:
+            group_of_index[int(m)] = g.label
+            affinity_by_index[int(m)] = float(aff[int(m)])
+        all_medoids.extend(int(m) for m in chosen)
+        if len(chosen) < want:
+            relaxations.append({
+                "type": "relaxation",
+                "scope": "multi_artist",
+                "bridge": f"{g.label}'s pier budget",
+                "relaxed": [
+                    f"{g.label} ({len(chosen)}/{want} pier(s) seated, "
+                    f"{len(g.indices)} track(s) in your library)"
+                ],
+                "severity": "info",
+            })
+
+    if not all_medoids:
+        logger.warning("Multi-artist: no medoids produced — falling back.")
+        return None
+
+    ordered, _improved = order_with_alternation(
+        all_medoids, X_norm_shared, group_of_index,
+        alternation_bonus=ma_cfg.alternation_bonus,
+    )
+
+    mean_affinity = (
+        float(np.mean([affinity_by_index.get(i, 0.0) for i in ordered]))
+        if ordered else 0.0
+    )
+    if mean_affinity < ma_cfg.low_overlap_threshold:
+        detail = (
+            f"{' & '.join(g.label for g in exclusive)} share little sonic ground "
+            f"(mean pier affinity {mean_affinity:.2f})"
+        )
+        relaxations.append({
+            "type": "relaxation",
+            "scope": "multi_artist",
+            "bridge": detail,
+            "relaxed": ["piers stayed characteristic rather than meeting in the middle"],
+            "severity": "info",
+        })
+        logger.warning("Multi-artist: %s", detail)
+
+    # blocked_artist_keys becomes pier_bridge_builder._derive_seed_artist_keys's
+    # `override`, which does `frozenset(str(k) for k in override if k)` -- handing
+    # it a bare string would silently iterate CHARACTERS. Built directly as a
+    # frozenset comprehension here, so it is never anything else; asserted
+    # defensively because that call site has no such guard of its own.
+    blocked = frozenset(
+        resolve_alias(normalize_artist_key(g.label))
+        for g in exclusive
+    )
+    assert isinstance(blocked, frozenset), (
+        "blocked_artist_keys must be a frozenset of artist keys, never a bare string"
+    )
+
+    logger.info(
+        "Multi-artist piers: %d seated across %s, mean_affinity=%.3f, order=%s",
+        len(ordered), [g.label for g in groups], mean_affinity,
+        [group_of_index.get(i, "?") for i in ordered],
+    )
+    return MultiArtistPiers(
+        ordered_medoids=ordered,
+        relaxations=relaxations,
+        groups=groups,
+        mean_affinity=mean_affinity,
+        blocked_artist_keys=blocked,
+    )
