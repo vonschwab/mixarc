@@ -287,12 +287,21 @@ def total_pier_budget(
     ``max_artist_fraction`` (the Artist-presence dial) is EACH seed artist's share,
     so N groups get N times the single-artist base -- clamped by a floor that keeps
     bridge segments long enough to be bridgeable, and never below one per group.
+
+    The clamp is ``track_count // 5``, not ``// 3``: Task 13 live acceptance testing
+    (task-13-report.md) measured ``// 3`` producing 10 piers for a 30-track/3-group
+    blend (Eno + Budd + their joint credit) -- 9 bridge segments averaging ~2.2
+    tracks each, versus ~8.7 for a comparable solo playlist's 6 piers. That is a
+    genuine starvation defect: too little room for the beam to land a smooth
+    transition, independent of any ordering or overlap-weight tuning (both were
+    swept and proven not to move the result). ``// 5`` widens the same 30-track/
+    3-group case to 6 piers (~4.8 tracks/segment) -- human-ruled fix, 2026-07-30.
     """
     base = max(3, round(int(track_count) * float(max_artist_fraction)))
     n = max(1, int(n_groups))
     if n == 1:
         return base
-    segment_floor = max(n, int(track_count) // 3)
+    segment_floor = max(n, int(track_count) // 5)
     return max(n, min(n * base, segment_floor))
 
 

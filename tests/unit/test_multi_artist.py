@@ -323,10 +323,16 @@ def test_single_group_budget_matches_todays_formula():
 
 
 def test_two_groups_double_the_budget_within_the_segment_floor():
-    # 30 tracks, 0.125 -> base 4; two groups -> 8; floor = 30 // 3 = 10
-    assert total_pier_budget(30, 0.125, 2) == 8
-    # 15 tracks, 0.125 -> base 3; two groups -> 6; floor = 5 -> clamped to 5
-    assert total_pier_budget(15, 0.125, 2) == 5
+    # Human ruling 2026-07-30 (task-13-report.md): the segment_floor clamp
+    # changed from track_count // 3 to track_count // 5 -- // 3 was a real
+    # pier-density starvation defect (10 piers on a 30-track/3-group blend
+    # left ~2.2 tracks per bridge segment; see multi_artist.py's
+    # total_pier_budget docstring). These two expected values are recomputed
+    # by hand from the NEW formula, not loosened.
+    # 30 tracks, 0.125 -> base 4; two groups -> 8; floor = 30 // 5 = 6 -> clamped to 6
+    assert total_pier_budget(30, 0.125, 2) == 6
+    # 15 tracks, 0.125 -> base 3; two groups -> 6; floor = 15 // 5 = 3 -> clamped to 3
+    assert total_pier_budget(15, 0.125, 2) == 3
 
 
 def test_budget_never_drops_below_one_per_group():

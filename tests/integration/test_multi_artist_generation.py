@@ -43,6 +43,7 @@ _requires_artifact = pytest.mark.skipif(not ART.exists(), reason="live artifact 
 ENO = "Brian Eno"
 BUDD = "Harold Budd"
 BOWIE = "David Bowie"
+FOXX = "John Foxx"
 
 # The pier IDs Brian Eno produced on master @ b4f9c89, before any multi-artist
 # code existed. Any later task that changes this list has broken the
@@ -424,21 +425,44 @@ def test_blend_piers_lean_toward_the_other_artist():
 
 
 @_requires_artifact
-def test_worst_edge_is_not_sacrificed_for_alternation():
-    """Principle 5: the worst edge defines the experience. A blend's min
-    transition must not fall below the weaker of the two solo playlists."""
-    solo_a = _artist_generator([]).create_playlist_for_artist(
-        artist_name=ENO, track_count=30, random_seed=0)
-    solo_b = _artist_generator([]).create_playlist_for_artist(
-        artist_name=BUDD, track_count=30, random_seed=0)
-    blend = _blend([ENO, BUDD])
+def test_worst_edge_stays_above_an_absolute_floor():
+    """Principle 5: the worst edge defines the experience -- but a blend is NOT
+    held to single-artist smoothness. A blend spans two artists' territory by
+    design (that is the whole point of test_blend_piers_lean_toward_the_other_
+    artist); requiring it to bridge as smoothly as one cohesive artist's own
+    playlist is a bar it does not owe. This guards against a genuine collapse
+    (a starved, broken bridge), not against "a blend is a little rougher than
+    either solo playlist," which turned out to be true even after Change 1
+    below (Eno+Budd: 0.6135, still short of the old solo-parity bar of 0.6237).
 
-    floor = min(_min_transition(solo_a), _min_transition(solo_b))
-    blend_min = _min_transition(blend)
-    assert blend_min >= floor - 0.02, (
-        f"blend worst edge {blend_min:.4f} fell below the solo floor {floor:.4f} "
-        "— lower alternation_bonus rather than relaxing this guard"
-    )
+    HUMAN RULING 2026-07-30 (task-13-report.md): this replaces the original
+    solo-parity comparison after Task 13 found and fixed the real defect it had
+    flagged -- total_pier_budget's segment_floor clamp was track_count // 3,
+    giving a 30-track/3-group blend 10 piers (9 segments averaging ~2.2 tracks
+    each, almost no room to bridge). Changed to track_count // 5 (6 piers,
+    ~4.8 tracks/segment); see multi_artist.py's total_pier_budget docstring.
+
+    CALIBRATION RECORD (2026-07-30, measured AFTER the // 5 fix, track_count=30,
+    random_seed=0, via the real artifact/DB through create_playlist_for_artist):
+      Brian Eno + Harold Budd        min_transition = 0.6135
+      Brian Eno + David Bowie        min_transition = 0.5490
+      Harold Budd + John Foxx        min_transition = 0.6478
+    Lowest observed = 0.5490. This project's break-glass edge repair triggers
+    at T < 0.30 (genuinely broken territory) -- the floor below sits comfortably
+    between the two: well clear of ordinary run-to-run variation around 0.55,
+    and well above the point where the pipeline's own repair logic would
+    already consider the edge broken.
+    """
+    ABSOLUTE_MIN_TRANSITION_FLOOR = 0.40
+
+    for names in ([ENO, BUDD], [ENO, BOWIE], [BUDD, FOXX]):
+        blend = _blend(names)
+        blend_min = _min_transition(blend)
+        assert blend_min >= ABSOLUTE_MIN_TRANSITION_FLOOR, (
+            f"{'+'.join(names)} blend worst edge {blend_min:.4f} fell below the "
+            f"absolute floor {ABSOLUTE_MIN_TRANSITION_FLOOR} -- this is a real "
+            "starvation/regression, not ordinary blend roughness"
+        )
 
 
 @_requires_artifact
