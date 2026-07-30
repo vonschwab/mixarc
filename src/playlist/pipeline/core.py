@@ -374,6 +374,15 @@ def generate_playlist_ds(
     # seed_artist_keys_override kwarg. None (default) preserves the
     # single-artist derivation byte-for-byte.
     seed_artist_keys_override: Optional[Sequence[str]] = None,
+    # Multi-artist blend (Task 10 fix, human ruling): the number of surviving
+    # artist groups (joint group included) when the multi-artist branch
+    # produced piers; 1 (default) is a no-op. max_artist_fraction means EACH
+    # seed artist's share of the playlist -- the same reading Task 5's
+    # total_pier_budget = n * base already applies to the pier budget -- so
+    # the post-order per-artist cap below must scale by the same n, or a
+    # legitimate N-artist pier allocation self-reports as "degraded" via
+    # post_order_validation's artist_cap_violation on every successful blend.
+    multi_artist_group_count: int = 1,
     # Optional pier-bridge infeasible handling + audit context (CLI/GUI)
     dry_run: bool = False,
     pool_source: Optional[str] = None,
@@ -571,6 +580,19 @@ def generate_playlist_ds(
     if single_artist:
         # Disable artist cap for single-artist runs
         cfg = replace(cfg, construct=replace(cfg.construct, max_artist_fraction_final=1.0))
+    elif multi_artist_group_count > 1:
+        # Multi-artist blend: scale the per-artist cap by the number of
+        # surviving groups (see the parameter docstring above) -- same shape
+        # of adjustment as the single_artist branch, same place in the flow.
+        cfg = replace(
+            cfg,
+            construct=replace(
+                cfg.construct,
+                max_artist_fraction_final=(
+                    cfg.construct.max_artist_fraction_final * multi_artist_group_count
+                ),
+            ),
+        )
     # Also apply any runtime overrides (for backward compatibility with nested structure)
     cfg = _apply_overrides(cfg, overrides)
 

@@ -602,6 +602,7 @@ class PlaylistGenerator:
         pace_mode: Optional[str] = None,
         tag_anchor_track_ids: Optional[Set[str]] = None,
         seed_artist_keys_override: Optional[Sequence[str]] = None,
+        multi_artist_group_count: int = 1,
     ) -> List[Dict[str, Any]]:
         """
         Run DS pipeline and return ordered track dicts; raise on failure.
@@ -991,6 +992,7 @@ class PlaylistGenerator:
             internal_connector_priority=internal_connector_priority,
             tag_anchor_track_ids=tag_anchor_track_ids,
             seed_artist_keys_override=seed_artist_keys_override,
+            multi_artist_group_count=multi_artist_group_count,
         )
 
         tracks: List[Dict[str, Any]] = []
@@ -2217,6 +2219,14 @@ class PlaylistGenerator:
                     ordered_medoids = list(_ma_piers.ordered_medoids)
                     _multi_artist_blocked_keys = _ma_piers.blocked_artist_keys
                     _multi_artist_relaxations = list(_ma_piers.relaxations)
+                    # max_artist_fraction means EACH seed artist's share of the
+                    # playlist (the same reading Task 5's total_pier_budget = n *
+                    # base already applies to the pier budget) -- so the
+                    # post-order per-artist cap must scale by the same n (every
+                    # surviving group, joint included) or a legitimate N-artist
+                    # pier allocation self-reports as "degraded" on every
+                    # successful blend (human ruling, task-10 review).
+                    _multi_artist_group_count = len(_ma_piers.groups)
                     # Diagnostics-only stand-ins for the single-artist clustering
                     # locals style_summary / the ENABLED log below read: one
                     # "cluster" per artist group, its seated piers as members.
@@ -2228,6 +2238,7 @@ class PlaylistGenerator:
                     _tag_anchor_ids = None
                 else:
                     _multi_artist_blocked_keys = None
+                    _multi_artist_group_count = 1
 
                 if _ma_piers is None:
                     clusters, medoids, medoids_by_cluster, X_norm, support_by_index = cluster_artist_tracks(
@@ -2649,6 +2660,7 @@ class PlaylistGenerator:
                     audit_context_extra={"style_summary": style_summary},
                     tag_anchor_track_ids=_tag_anchor_ids,
                     seed_artist_keys_override=_multi_artist_blocked_keys,
+                    multi_artist_group_count=_multi_artist_group_count,
                 )
             except ValueError as e:
                 error_msg = str(e)
@@ -2691,6 +2703,7 @@ class PlaylistGenerator:
                             audit_context_extra={"style_summary": style_summary},
                             tag_anchor_track_ids=_tag_anchor_ids,
                             seed_artist_keys_override=_multi_artist_blocked_keys,
+                            multi_artist_group_count=_multi_artist_group_count,
                         )
                         fallback_used = True
                         logger.warning(
