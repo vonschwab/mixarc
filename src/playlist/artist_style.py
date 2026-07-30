@@ -838,6 +838,7 @@ def cluster_artist_tracks(
     bridgeability_eligible_mask: Optional[np.ndarray] = None,
     overlap_affinity: Optional[np.ndarray] = None,
     overlap_weight: float = 0.0,
+    min_pier_duration_seconds: Optional[int] = None,
 ) -> Tuple[List[List[int]], List[int], List[List[int]], np.ndarray, Dict[int, float]]:
     """Cluster artist tracks in sonic space and return clusters + medoids.
 
@@ -846,6 +847,19 @@ def cluster_artist_tracks(
     (see ``compute_within_artist_support``) -- computed once here and reused
     both for the per-cluster medoid demotion below and by callers doing
     arc-aware pier ordering (``reorder_avoiding_low_support_terminal``).
+
+    ``min_pier_duration_seconds``, when given, is a HARD floor on pier
+    candidacy (not the soft ``medoid_duration_weight`` outlier penalty below,
+    which only demotes): any candidate under this many seconds is dropped from
+    ``artist_indices`` before clustering, so sub-minimum fragments -- vocal
+    outtakes, intros, skits -- can never seat as a pier regardless of how the
+    medoid score ranks them. This is the single choke point both the
+    single-artist and multi-artist pier-selection callers route through, so
+    the gate cannot be bypassed by a future caller that forgets its own
+    pre-filter (see docs/superpowers/specs/2026-07-29-multi-artist-blend-design.md
+    duration-gate addendum). Mirrors the min-duration half of
+    ``genre_mode.filter_member_indices_by_duration`` (unknown/zero duration
+    means "unknown", not "invalid", and is kept).
     """
     track_ids = bundle.track_ids
     if bundle.artist_keys is None:
@@ -881,6 +895,33 @@ def cluster_artist_tracks(
                 "Artist style seed freshness: removed %d recent artist tracks before clustering",
                 removed,
             )
+    _duration_gate_removed = 0
+    if min_pier_duration_seconds is not None and getattr(bundle, "durations_ms", None) is not None:
+        before = len(artist_indices)
+        min_ms = float(min_pier_duration_seconds) * 1000.0
+        durations = bundle.durations_ms
+        kept: List[int] = []
+        for idx in artist_indices:
+            try:
+                d = float(durations[idx])
+            except (IndexError, TypeError, ValueError):
+                kept.append(idx)  # unknown duration -- keep, never invalid
+                continue
+            # <= 0 means "unknown", not "invalid" (mirrors
+            # genre_mode.filter_member_indices_by_duration) -- missing
+            # metadata must never silently shrink the pier pool.
+            if d <= 0.0 or d >= min_ms:
+                kept.append(idx)
+        artist_indices = kept
+        _duration_gate_removed = before - len(artist_indices)
+        if _duration_gate_removed:
+            logger.info(
+                "Pier duration gate: %s removed %d/%d sub-minimum track(s) "
+                "(<%ds) from pier candidacy -- hard floor, prevents "
+                "interludes/outtakes/skits from seating as a pier",
+                artist_name, _duration_gate_removed, before,
+                int(min_pier_duration_seconds),
+            )
     if restrict_to_track_ids is not None:
         before = len(artist_indices)
         keep = {str(tid) for tid in restrict_to_track_ids}
@@ -912,8 +953,29 @@ def cluster_artist_tracks(
                 "Artist style version-dedup: %s %d -> %d tracks (one canonical version per song)",
                 artist_name, before, len(artist_indices),
             )
-    if len(artist_indices) < max(3, cfg.cluster_k_min):
-        raise ValueError(f"Not enough tracks to cluster for artist {artist_name}")
+    _min_required = max(3, cfg.cluster_k_min)
+    if len(artist_indices) < _min_required:
+        if _duration_gate_removed:
+            # Starvation caused (at least partly) by the hard duration floor
+            # must be loud and name the artist + counts -- never a silent
+            # relax, never a bare crash with no context (design principle 20
+            # / project gotcha "a configured knob that can't act is a startup
+            # error, not a silent no-op"). The caller's own thin-artist
+            # handling (single-artist: this raise propagates; multi-artist:
+            # select_multi_artist_piers's per-group except-ValueError) is
+            # what actually decides what happens next -- this WARNING only
+            # makes the cause observable in the log.
+            logger.warning(
+                "Pier duration gate: %s starved to %d eligible track(s) "
+                "(need >= %d) after removing %d sub-%ds candidate(s) -- this "
+                "artist cannot seat piers this run.",
+                artist_name, len(artist_indices), _min_required,
+                _duration_gate_removed, int(min_pier_duration_seconds or 0),
+            )
+        raise ValueError(
+            f"Not enough tracks to cluster for artist {artist_name} "
+            f"({len(artist_indices)} eligible, need >= {_min_required})"
+        )
 
     # Support-aware pier demotion (Task 3): within-artist-catalog neighborhood
     # density, computed once over the full (post-filter) candidate pool so it's

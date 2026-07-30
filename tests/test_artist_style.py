@@ -1695,3 +1695,129 @@ def test_overlap_weight_zero_is_inert():
         overlap_weight=0.0, overlap_values=np.array([0.0, 1.0]),
     )
     assert a == b
+
+
+# ── Hard pier duration gate (2026-07-30 fix) ──────────────────────────────
+# Piers are STRUCTURAL: the whole bridge segment is built around one. A
+# sub-minimum fragment (interlude/outtake/intro/skit) seated as a pier
+# infects the entire segment, which is why this matters more for piers than
+# for bridge tracks (the bridge/candidate-pool side already enforces the same
+# floor via _build_duration_exclusions_for_ds). Distinct from the existing
+# medoid_duration_weight soft outlier penalty, which only demotes -- a strong
+# enough sonic-centrality score can still out-rank the penalty (this is
+# exactly what let "Vocal Outtakes" (0:36) and "Gnot Up! V2" (0:41) seat as
+# real piers). min_pier_duration_seconds is a hard exclusion applied before
+# clustering even starts.
+
+def test_min_pier_duration_seconds_excludes_sub_minimum_track():
+    """A 30s fragment sitting dead-center of a sonic cluster -- the case that
+    would win purely on sonic centrality -- must never be selected as a pier,
+    or even survive into the candidate pool, once the hard duration floor is
+    given."""
+    artist_keys = np.array(["a"] * 6)
+    track_ids = np.array([str(i) for i in range(6)])
+    X = np.array([
+        [1.0, 0.0], [0.9, 0.1], [0.95, -0.05],  # cluster 1 -- index 0 dead-center
+        [0.0, 1.0], [0.1, 0.9], [-0.05, 0.95],  # cluster 2
+    ])
+    bundle = DummyBundle(X_sonic=X, artist_keys=artist_keys, track_ids=track_ids)
+    bundle.durations_ms = np.array(
+        [30_000, 200_000, 200_000, 200_000, 200_000, 200_000], dtype=float
+    )
+    cfg = ArtistStyleConfig(
+        cluster_k_min=2, cluster_k_max=2, piers_per_cluster=1, enabled=True,
+        pier_bridgeability_enabled=False, dedupe_versions=False,
+    )
+    clusters, medoids, medoids_by_cluster, X_norm, _support = cluster_artist_tracks(
+        bundle=bundle, artist_name="A", cfg=cfg, random_seed=0,
+        min_pier_duration_seconds=46,
+    )
+    assert 0 not in medoids, "sub-minimum (30s < 46s) track seated as a pier"
+    all_members = {i for c in clusters for i in c}
+    assert 0 not in all_members, "sub-minimum track survived into the candidate pool at all"
+
+
+def test_min_pier_duration_seconds_none_is_regression_safe():
+    """Omitting the new kwarg (existing callers, existing tests) must not
+    change anything -- the gate is opt-in per call, not implicitly wired."""
+    artist_keys = np.array(["a"] * 6)
+    track_ids = np.array([str(i) for i in range(6)])
+    X = np.array([
+        [1.0, 0.0], [0.9, 0.1], [0.95, -0.05],
+        [0.0, 1.0], [0.1, 0.9], [-0.05, 0.95],
+    ])
+    bundle = DummyBundle(X_sonic=X, artist_keys=artist_keys, track_ids=track_ids)
+    bundle.durations_ms = np.array(
+        [30_000, 200_000, 200_000, 200_000, 200_000, 200_000], dtype=float
+    )
+    cfg = ArtistStyleConfig(
+        cluster_k_min=2, cluster_k_max=2, piers_per_cluster=1, enabled=True,
+        pier_bridgeability_enabled=False, dedupe_versions=False,
+    )
+    clusters, medoids, _by_cluster, _X_norm, _support = cluster_artist_tracks(
+        bundle=bundle, artist_name="A", cfg=cfg, random_seed=0,
+    )
+    all_members = {i for c in clusters for i in c}
+    assert all_members == {0, 1, 2, 3, 4, 5}, "gate fired despite min_pier_duration_seconds=None"
+
+
+def test_min_pier_duration_seconds_unknown_duration_is_kept():
+    """Zero/missing duration means 'unknown', not 'invalid' -- mirrors
+    genre_mode.filter_member_indices_by_duration. Incomplete metadata must
+    never silently shrink the pier candidate pool."""
+    artist_keys = np.array(["a"] * 6)
+    track_ids = np.array([str(i) for i in range(6)])
+    X = np.array([
+        [1.0, 0.0], [0.9, 0.1], [0.95, -0.05],
+        [0.0, 1.0], [0.1, 0.9], [-0.05, 0.95],
+    ])
+    bundle = DummyBundle(X_sonic=X, artist_keys=artist_keys, track_ids=track_ids)
+    bundle.durations_ms = np.array(
+        [0.0, 200_000, 200_000, 200_000, 200_000, 200_000], dtype=float
+    )
+    cfg = ArtistStyleConfig(
+        cluster_k_min=2, cluster_k_max=2, piers_per_cluster=1, enabled=True,
+        pier_bridgeability_enabled=False, dedupe_versions=False,
+    )
+    clusters, _medoids, _by_cluster, _X_norm, _support = cluster_artist_tracks(
+        bundle=bundle, artist_name="A", cfg=cfg, random_seed=0,
+        min_pier_duration_seconds=46,
+    )
+    all_members = {i for c in clusters for i in c}
+    assert 0 in all_members, "zero/unknown duration was treated as sub-minimum and dropped"
+
+
+def test_min_pier_duration_seconds_starvation_warns_and_raises(caplog):
+    """Every track in a 2-track artist catalog is sub-minimum -> zero eligible
+    candidates. Must never silently relax the gate and never crash with no
+    context: log a WARNING naming the artist and the counts, then raise the
+    existing too-few-tracks ValueError (the caller's thin-artist handling
+    decides what happens next -- single-artist: propagates and the outer
+    fallback-to-legacy path takes over; multi-artist: the per-group
+    except-ValueError catch)."""
+    import logging
+    artist_keys = np.array(["a", "a"])
+    track_ids = np.array(["0", "1"])
+    X = np.array([[1.0, 0.0], [0.9, 0.1]])
+    bundle = DummyBundle(X_sonic=X, artist_keys=artist_keys, track_ids=track_ids)
+    bundle.durations_ms = np.array([30_000, 35_000], dtype=float)
+    cfg = ArtistStyleConfig(
+        cluster_k_min=3, enabled=True,
+        pier_bridgeability_enabled=False, dedupe_versions=False,
+    )
+    with caplog.at_level(logging.WARNING, logger="src.playlist.artist_style"):
+        with pytest.raises(ValueError, match="Not enough tracks to cluster for artist A"):
+            cluster_artist_tracks(
+                bundle=bundle, artist_name="A", cfg=cfg, random_seed=0,
+                min_pier_duration_seconds=46,
+            )
+    starvation_records = [
+        r for r in caplog.records
+        if r.levelno == logging.WARNING and "Pier duration gate" in r.message and "A" in r.message
+    ]
+    assert starvation_records, (
+        f"expected a WARNING naming the artist and counts; got: "
+        f"{[r.message for r in caplog.records]}"
+    )
+    assert "0 eligible" in starvation_records[0].message
+    assert "2 sub-46s" in starvation_records[0].message

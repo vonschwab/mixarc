@@ -657,6 +657,74 @@ def test_orchestrator_reports_low_overlap():
                for r in out.relaxations)
 
 
+# ── Hard pier duration gate on the multi-artist path (2026-07-30 fix) ────
+# select_multi_artist_piers routes every group through cluster_artist_tracks
+# (artist_style.py), which is where the hard min-duration floor lives -- this
+# proves the gate reaches the multi-artist path too, not just single-artist.
+
+def test_min_pier_duration_seconds_drops_sub_minimum_pier_from_blend():
+    """Index 2 ("A") is a real pier in the ungated baseline. Sub-minimum it
+    (30s) and re-run with the gate: it must be gone from the piers, replaced
+    by a different eligible "A" candidate, and the blend must still succeed
+    (this is one short track among five, not total starvation)."""
+    b = _blend_bundle()
+    baseline = select_multi_artist_piers(
+        bundle=b, artist_names=["A", "B"],
+        style_cfg=ArtistStyleConfig(enabled=True, pier_bridgeability_enabled=False),
+        ma_cfg=MultiArtistConfig(), track_count=30, max_artist_fraction=0.125,
+    )
+    assert 2 in baseline.ordered_medoids, "test fixture assumption changed -- update the index"
+
+    b2 = _blend_bundle()
+    b2.durations_ms[2] = 30_000.0
+    gated = select_multi_artist_piers(
+        bundle=b2, artist_names=["A", "B"],
+        style_cfg=ArtistStyleConfig(enabled=True, pier_bridgeability_enabled=False),
+        ma_cfg=MultiArtistConfig(), track_count=30, max_artist_fraction=0.125,
+        min_pier_duration_seconds=46,
+    )
+    assert 2 not in gated.ordered_medoids, "sub-minimum (30s < 46s) track seated as a pier"
+    assert isinstance(gated, MultiArtistPiers), "blend must still succeed for the rest of the group"
+    a_piers = [g for g in gated.groups if g.label == "A"]
+    assert a_piers, "the 'A' group must still be present"
+
+
+def test_min_pier_duration_seconds_starvation_warns_not_crashes(caplog):
+    """Every 'A' track sub-minimum -> the group is starved to zero eligible
+    tracks. Must not crash the whole blend and must not silently drop 'A': a
+    WARNING names the artist and counts (artist_style's own gate) and the
+    existing per-group relaxation mechanism reports it -- exactly the
+    'existing thin-artist path' this fix must reuse, not replace. 'B' still
+    seats piers."""
+    import logging
+    b = _blend_bundle()
+    b.durations_ms[0:5] = 30_000.0  # all five "A" tracks sub-minimum
+
+    with caplog.at_level(logging.WARNING):
+        out = select_multi_artist_piers(
+            bundle=b, artist_names=["A", "B"],
+            style_cfg=ArtistStyleConfig(enabled=True, pier_bridgeability_enabled=False),
+            ma_cfg=MultiArtistConfig(), track_count=30, max_artist_fraction=0.125,
+            min_pier_duration_seconds=46,
+        )
+    assert isinstance(out, MultiArtistPiers), "one starved group must not crash the whole blend"
+    assert not any(g.label == "A" and not g.is_joint for g in out.groups) or \
+        all(m not in out.ordered_medoids for m in range(0, 5)), \
+        "no 'A' track should have seated as a pier"
+    b_piers = [g for g in out.groups if g.label == "B"]
+    assert b_piers and any(i in out.ordered_medoids for i in b_piers[0].indices), \
+        "'B' must still contribute piers"
+
+    gate_warning = [
+        r for r in caplog.records
+        if r.levelno == logging.WARNING and "Pier duration gate" in r.getMessage()
+        and "starved" in r.getMessage()
+    ]
+    assert gate_warning, f"expected a starvation WARNING naming the artist; got {[r.getMessage() for r in caplog.records]}"
+    thin_relaxation = [r for r in out.relaxations if r.get("bridge") == "A"]
+    assert thin_relaxation, f"expected a relaxation reporting 'A' contributed no piers, got {out.relaxations}"
+
+
 def _joint_only_bundle():
     """B has an exclusive catalog; A is credited ONLY jointly with B -- the
     real-library shape final-review Finding 1 protects (e.g. the real

@@ -2165,6 +2165,20 @@ class PlaylistGenerator:
                 # swallowed by the broad `except Exception` below, so it is
                 # tagged here and re-raised; see that handler for the other
                 # half of this contract.
+                # Hard minimum-duration gate on PIER candidacy (not just the
+                # bridge/candidate pool, which already enforces this via
+                # _build_duration_exclusions_for_ds inside
+                # _maybe_generate_ds_playlist). A sub-minimum pier -- an
+                # interlude, outtake, intro, or skit -- infects the whole
+                # segment built around it, so this matters MORE for piers than
+                # for bridge tracks. Same config key the bridge side and genre
+                # mode already read; no new knob. Enforced once, inside
+                # cluster_artist_tracks itself (the single choke point both the
+                # single-artist and multi-artist calls below route through),
+                # so a future caller cannot bypass it by forgetting a pre-filter.
+                _min_pier_duration_seconds = int(
+                    self.config.get("playlists", "min_track_duration_seconds", default=46)
+                )
                 _ma_piers = None
                 _multi_artist_relaxations: List[Dict[str, Any]] = []
                 _ma_names = [n for n in (artist_names or []) if str(n).strip()]
@@ -2194,6 +2208,7 @@ class PlaylistGenerator:
                                 include_collaborations=include_collaborations,
                                 excluded_track_ids=_relaxed_excluded,
                                 metadata_db_path=resolve_database_path(self.config),
+                                min_pier_duration_seconds=_min_pier_duration_seconds,
                             )
                         except MultiArtistBlendFailed as _ma_exc:
                             logger.warning(
@@ -2256,6 +2271,7 @@ class PlaylistGenerator:
                         sonic_tag_weight=sonic_tag_weight,
                         target_pier_count=target_pier_count,
                         restrict_to_track_ids=_M_ids,
+                        min_pier_duration_seconds=_min_pier_duration_seconds,
                     )
                     _terminal_avoidance_support = (
                         support_by_index if style_cfg.pier_support_terminal_avoidance else None

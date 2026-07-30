@@ -570,6 +570,7 @@ def select_multi_artist_piers(
     include_collaborations: bool = False,
     excluded_track_ids: Optional[set] = None,
     metadata_db_path: Optional[str] = None,
+    min_pier_duration_seconds: Optional[int] = None,
 ) -> Optional[MultiArtistPiers]:
     """Pick and order the piers for a 2+ artist blend.
 
@@ -607,6 +608,14 @@ def select_multi_artist_piers(
     each ``relaxed`` entry a short noun phrase that reads naturally after the
     word "dropped" (see task-9-report.md, Finding 4, for the exact rendered
     sentence of every entry this function emits).
+
+    ``min_pier_duration_seconds``, when given, is forwarded to every per-group
+    ``cluster_artist_tracks`` call below as a HARD floor on pier candidacy
+    (sub-minimum fragments -- outtakes, intros, skits -- must never seat as a
+    pier). A group starved below the clustering floor by this gate hits the
+    same per-group ``except ValueError`` path as any other thin group: it
+    contributes no piers and is reported via the relaxation list, never a
+    silent drop and never a crash of the whole blend.
     """
     import math
 
@@ -758,6 +767,7 @@ def select_multi_artist_piers(
                 member_indices=list(g.indices),
                 overlap_affinity=aff,
                 overlap_weight=ma_cfg.overlap_weight,
+                min_pier_duration_seconds=min_pier_duration_seconds,
             )
         except ValueError as exc:
             logger.warning(
