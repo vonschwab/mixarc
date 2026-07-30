@@ -213,6 +213,80 @@ describe("GenerateControls multi-artist blend", () => {
     expect(payload.artists).toEqual(["Brian Eno", "Harold Budd"]);
   });
 
+  it("refocusing an already-picked chip does not reopen its dropdown or refire the search", async () => {
+    // Scoped to a "har" prefix so the primary artist input's own autocomplete
+    // can't also surface "Harold Budd" and create an ambiguous duplicate match.
+    const autocompleteMock = vi.spyOn(api, "autocomplete").mockImplementation(async (q: string) => ({
+      items: q.toLowerCase().startsWith("har") ? ["Harold Budd"] : [],
+      has_more: false,
+    }));
+    renderControls({ mode: "artist" });
+
+    fireEvent.change(screen.getByPlaceholderText("Artist name…"), { target: { value: "Brian Eno" } });
+    fireEvent.click(screen.getByRole("button", { name: /add artist/i })); // chip 0 ("Second artist…")
+    fireEvent.click(screen.getByRole("button", { name: /add artist/i })); // chip 1 ("Another artist…")
+    const chip0 = screen.getByPlaceholderText(/second artist/i) as HTMLInputElement;
+    const chip1 = screen.getByPlaceholderText(/another artist/i) as HTMLInputElement;
+
+    // Pick a suggestion into chip 0.
+    fireEvent.focus(chip0);
+    fireEvent.change(chip0, { target: { value: "Har" } });
+    const suggestion = await screen.findByText("Harold Budd");
+    fireEvent.click(suggestion);
+    expect(chip0.value).toBe("Harold Budd");
+    const callsAfterPick = autocompleteMock.mock.calls.length;
+
+    // Focus away to chip 1, then refocus chip 0 without editing it.
+    fireEvent.focus(chip1);
+    fireEvent.focus(chip0);
+
+    // Give the hook's debounce window a chance to fire if it were going to.
+    await new Promise((resolve) => setTimeout(resolve, 250));
+
+    expect(screen.queryByText("Harold Budd", { selector: "li" })).toBeNull();
+    expect(autocompleteMock.mock.calls.length).toBe(callsAfterPick);
+  });
+
+  it("removing an earlier chip re-targets the active search to the same logical chip, not a stale index", async () => {
+    const autocompleteMock = vi.spyOn(api, "autocomplete").mockImplementation(async (q: string) => ({
+      items: q ? [`${q} Result`] : [],
+      has_more: false,
+    }));
+    renderControls({ mode: "artist" });
+
+    fireEvent.change(screen.getByPlaceholderText("Artist name…"), { target: { value: "Brian Eno" } });
+    fireEvent.click(screen.getByRole("button", { name: /add artist/i })); // chip 0
+    fireEvent.click(screen.getByRole("button", { name: /add artist/i })); // chip 1
+    const chip0 = screen.getByPlaceholderText(/second artist/i) as HTMLInputElement;
+    const chip1 = screen.getByPlaceholderText(/another artist/i) as HTMLInputElement;
+    expect(chip0.value).toBe(""); // chip 0 stays untouched — it's what gets removed below
+
+    // Focus chip 1 (index 1) and start typing — it owns the shared search.
+    fireEvent.focus(chip1);
+    fireEvent.change(chip1, { target: { value: "Budd" } });
+    await screen.findByText("Budd Result");
+
+    // Remove chip 0 (index 0). Chip 1's content ("Budd") is now at index 0;
+    // a stale `activeChip === 1` would re-read the now-blank index 1 (or an
+    // out-of-range index) and silently retarget/drop the search instead of
+    // following the surviving chip.
+    fireEvent.click(screen.getByRole("button", { name: /remove artist 2/i }));
+
+    // Exactly one chip remains, and it still holds what was typed — the
+    // removal did not clear or misdirect the in-progress chip.
+    const remainingInputs = screen.getAllByPlaceholderText(/second artist|another artist/i) as HTMLInputElement[];
+    expect(remainingInputs).toHaveLength(1);
+    expect(remainingInputs[0].value).toBe("Budd");
+
+    // The shared search must still be live for THIS (now re-indexed) chip —
+    // not stuck pointing at the removed or an out-of-range index. Typing
+    // further and getting a matching result proves it re-targeted correctly
+    // rather than silently going stale.
+    fireEvent.change(remainingInputs[0], { target: { value: "Buddy" } });
+    await screen.findByText("Buddy Result");
+    expect(autocompleteMock.mock.calls.some(([q]) => q === "Buddy")).toBe(true);
+  });
+
   it("clears extra artist chips when leaving artist mode", () => {
     const { rerender } = renderControls({ mode: "artist" });
     fireEvent.click(screen.getByRole("button", { name: /add artist/i }));

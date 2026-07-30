@@ -142,14 +142,20 @@ export function GenerateControls({
 
   // Extra-artist chip autocomplete — ONE shared hook instance across all chips
   // (React hooks can't be called in a loop). Driven by whichever chip is
-  // currently focused (`activeChip`); `chipSelectedRef` mirrors `selectedRef`
+  // currently focused (`activeChip`); `chipSelectedByIndex` mirrors `selectedRef`
   // above so picking a suggestion doesn't immediately reopen the dropdown.
   // Deliberately a separate instance from `artistSearch` — that one's query is
   // bound to `seed` by an effect below, and sharing would make the two fight
   // over one query state.
+  //
+  // The "last picked" guard is keyed PER CHIP INDEX (not a single scalar like
+  // `selectedRef`): refocusing an already-filled chip must not reopen its
+  // dropdown, but focusing a *different* chip must not clear the first chip's
+  // guard either — a shared scalar conflates the two chips. Re-keyed on chip
+  // removal (see removeChip) so indices stay aligned as later chips shift down.
   const chipSearch = useInfiniteSearch<string>({ fetchPage: api.autocomplete, pageSize: 30 });
   const [activeChip, setActiveChip] = useState<number | null>(null);
-  const chipSelectedRef = useRef<string | null>(null);
+  const chipSelectedByIndex = useRef<Record<number, string | null>>({});
   const chipDropdownRefs = useRef<Record<number, HTMLElement | null>>({});
 
   // Tag steering (artist mode): the artist's published genres as selectable chips.
@@ -264,15 +270,37 @@ export function GenerateControls({
   }, [activeChip]);
 
   // Drive the shared chip autocomplete from whichever chip is active. Skip
-  // one cycle after a selection (chipSelectedRef) so picking a name doesn't
-  // immediately re-open the dropdown for that chip.
+  // one cycle after a selection (chipSelectedByIndex, keyed by THIS chip's
+  // index) so picking a name doesn't immediately re-open the dropdown for
+  // that chip — and so refocusing a *different* already-filled chip doesn't
+  // spuriously reopen it either.
   useEffect(() => {
     if (activeChip === null) { chipSearch.reset(); return; }
     const val = extraArtists[activeChip] ?? "";
-    if (val === chipSelectedRef.current) return; // just selected this name — don't reopen the dropdown
+    if (val === (chipSelectedByIndex.current[activeChip] ?? null)) return; // just selected this name — don't reopen the dropdown
     chipSearch.setQuery(val);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeChip, extraArtists]);
+
+  // Remove chip `i`, keeping `activeChip`, the per-chip "last picked" guard,
+  // and the search itself aligned with the re-indexed array (every chip after
+  // `i` shifts down by one). Without this, removing an earlier chip while a
+  // later one is focused silently retargets the live search at the wrong chip.
+  function removeChip(i: number) {
+    setExtraArtists(extraArtists.filter((_, j) => j !== i));
+    const reindexed: Record<number, string | null> = {};
+    Object.entries(chipSelectedByIndex.current).forEach(([kStr, v]) => {
+      const k = Number(kStr);
+      if (k === i) return;
+      reindexed[k < i ? k : k - 1] = v;
+    });
+    chipSelectedByIndex.current = reindexed;
+    setActiveChip((prev) => {
+      if (prev === null) return null;
+      if (prev === i) { chipSearch.reset(); return null; } // the active chip itself was removed
+      return prev > i ? prev - 1 : prev;
+    });
+  }
 
   // Shared visual style for the artist-name input and the genre autocomplete input.
   const inputClassName = "w-full bg-well border border-border rounded text-xs text-text px-2.5 py-[3px]";
@@ -384,9 +412,13 @@ export function GenerateControls({
                   >
                     <input
                       value={name}
-                      onFocus={() => { setActiveChip(i); chipSelectedRef.current = null; }}
+                      // Only claim the shared search for this chip — do NOT clear its
+                      // "last picked" guard here. Nulling on focus (rather than only on
+                      // an actual edit) is exactly what reopened the dropdown for an
+                      // untouched, already-filled chip on refocus.
+                      onFocus={() => setActiveChip(i)}
                       onChange={(e) => {
-                        chipSelectedRef.current = null;
+                        chipSelectedByIndex.current[i] = null;
                         setActiveChip(i);
                         setExtraArtists(extraArtists.map((v, j) => (j === i ? e.target.value : v)));
                       }}
@@ -396,27 +428,33 @@ export function GenerateControls({
                     <button
                       type="button"
                       aria-label={`Remove artist ${i + 2}`}
-                      onClick={() => setExtraArtists(extraArtists.filter((_, j) => j !== i))}
+                      onClick={() => removeChip(i)}
                       className="text-faint hover:text-text inline-flex items-center justify-center leading-none pointer-coarse:min-h-11 pointer-coarse:min-w-11"
                     >
                       ×
                     </button>
                     {/* Chip autocomplete dropdown — same style as the primary input's,
                         but narrower-anchored under this chip and width-capped so it
-                        stays readable without forcing horizontal page scroll. */}
+                        stays readable without forcing horizontal page scroll. Center-anchored
+                        (left-1/2 + -translate-x-1/2) rather than left-0: a chip can sit
+                        anywhere in the wrapping row, including flush against the right edge
+                        on a narrow viewport, and there's no cheap CSS-only way to know which
+                        side has room without measuring the chip's position in JS. Centering
+                        halves the worst-case overflow on either side versus left-anchoring a
+                        wide dropdown off a narrow chip; max-w clamps it to the viewport. */}
                     {activeChip === i && chipSearch.items.length > 0 && (
                       <ul
                         onScroll={(e) => {
                           const el = e.currentTarget;
                           if (el.scrollHeight - el.scrollTop - el.clientHeight < 48) chipSearch.loadMore();
                         }}
-                        className="absolute z-10 top-full left-0 mt-1 w-64 max-w-[85vw] bg-panel border border-border rounded shadow-xl max-h-48 overflow-auto"
+                        className="absolute z-10 top-full left-1/2 -translate-x-1/2 mt-1 w-56 max-w-[calc(100vw-2rem)] bg-panel border border-border rounded shadow-xl max-h-48 overflow-auto"
                       >
                         {chipSearch.items.map((s) => (
                           <li
                             key={s}
                             onClick={() => {
-                              chipSelectedRef.current = s;
+                              chipSelectedByIndex.current[i] = s;
                               setExtraArtists(extraArtists.map((v, j) => (j === i ? s : v)));
                               chipSearch.reset();
                             }}
