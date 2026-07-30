@@ -1737,9 +1737,15 @@ def test_min_pier_duration_seconds_excludes_sub_minimum_track():
     assert 0 not in all_members, "sub-minimum track survived into the candidate pool at all"
 
 
-def test_min_pier_duration_seconds_none_is_regression_safe():
-    """Omitting the new kwarg (existing callers, existing tests) must not
-    change anything -- the gate is opt-in per call, not implicitly wired."""
+def test_min_pier_duration_seconds_default_is_the_safe_floor_not_none():
+    """Coordinator review 2026-07-30: the parameter's default must be a real,
+    safe floor (46s -- the same playlists.min_track_duration_seconds fallback
+    every other reader of that key in this codebase uses), not None. Every
+    current caller passes the live config value explicitly, but a FUTURE call
+    site that forgets this parameter entirely must still be gated -- that is
+    exactly how the pre-existing history-mode call site went unguarded after
+    the initial fix. Omitting the kwarg here must therefore still exclude the
+    sub-minimum track, not pass it through."""
     artist_keys = np.array(["a"] * 6)
     track_ids = np.array([str(i) for i in range(6)])
     X = np.array([
@@ -1756,9 +1762,40 @@ def test_min_pier_duration_seconds_none_is_regression_safe():
     )
     clusters, medoids, _by_cluster, _X_norm, _support = cluster_artist_tracks(
         bundle=bundle, artist_name="A", cfg=cfg, random_seed=0,
+        # min_pier_duration_seconds omitted entirely -- relying on the default.
     )
     all_members = {i for c in clusters for i in c}
-    assert all_members == {0, 1, 2, 3, 4, 5}, "gate fired despite min_pier_duration_seconds=None"
+    assert 0 not in all_members, (
+        "omitting the parameter must still gate at the safe default (46s); "
+        "a future call site that forgets it must not silently reopen this bug"
+    )
+
+
+def test_min_pier_duration_seconds_explicit_none_disables_the_gate():
+    """The safe default does not remove the ability to opt out: passing None
+    explicitly must still mean 'no duration gate', for a caller with a
+    genuine, deliberate reason to skip it (none exists in this codebase
+    today, but the capability stays available rather than being deleted)."""
+    artist_keys = np.array(["a"] * 6)
+    track_ids = np.array([str(i) for i in range(6)])
+    X = np.array([
+        [1.0, 0.0], [0.9, 0.1], [0.95, -0.05],
+        [0.0, 1.0], [0.1, 0.9], [-0.05, 0.95],
+    ])
+    bundle = DummyBundle(X_sonic=X, artist_keys=artist_keys, track_ids=track_ids)
+    bundle.durations_ms = np.array(
+        [30_000, 200_000, 200_000, 200_000, 200_000, 200_000], dtype=float
+    )
+    cfg = ArtistStyleConfig(
+        cluster_k_min=2, cluster_k_max=2, piers_per_cluster=1, enabled=True,
+        pier_bridgeability_enabled=False, dedupe_versions=False,
+    )
+    clusters, medoids, _by_cluster, _X_norm, _support = cluster_artist_tracks(
+        bundle=bundle, artist_name="A", cfg=cfg, random_seed=0,
+        min_pier_duration_seconds=None,
+    )
+    all_members = {i for c in clusters for i in c}
+    assert all_members == {0, 1, 2, 3, 4, 5}, "explicit None must still disable the gate"
 
 
 def test_min_pier_duration_seconds_unknown_duration_is_kept():

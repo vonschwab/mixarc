@@ -435,3 +435,86 @@ def test_genre_pool_threshold_matches_effective_cohesion_mode(
         f"effective cohesion_mode is {configured_mode!r} (expected "
         f"{expected_threshold}) — pool and beam disagree on cohesion mode"
     )
+
+
+# ---------------------------------------------------------------------------
+# History-mode (create_playlist_batch -> _create_playlists_from_single_artists)
+# pier duration gate. Coordinator review 2026-07-30: this call site was found
+# during the duration-gate fix (2026-07-29-multi-artist-blend duration-gate-
+# report.md) and initially left unwired -- a third, pre-existing entry into
+# cluster_artist_tracks with no test coverage at all. No existing test
+# exercises this path (grepped tests/ for create_playlist_batch /
+# _create_playlists_from_single_artists: zero hits), so this establishes
+# coverage rather than extending it, mirroring the capture-and-inspect style
+# already used above for create_playlist_for_genre. It cannot use that same
+# exception-propagation trick, though: _create_playlists_from_single_artists
+# wraps its whole artist-style clustering section (including the
+# cluster_artist_tracks call) in a bare `except Exception`, so a raised
+# sentinel would be silently swallowed and misreported as "artist style
+# clustering failed" rather than surfacing the captured kwargs. Instead the
+# stub records kwargs into a closure and returns a minimally valid result,
+# and the outer call is wrapped in try/except here because getting the whole
+# method to complete cleanly (real default_ds_config /
+# resolve_pier_bridge_tuning / _build_artist_pier_config calls follow) is out
+# of scope for what this test needs to prove: the capture happens before any
+# of that runs, so it is populated regardless of what happens afterward.
+# ---------------------------------------------------------------------------
+
+
+def test_history_mode_passes_min_pier_duration_seconds_to_cluster_artist_tracks(monkeypatch):
+    gen = make_synthetic_generator()
+
+    def _cfg_get(*args, **kwargs):
+        if args[:2] == ("playlists", "ds_pipeline"):
+            return {
+                "artifact_path": "synthetic-history-bundle",
+                "artist_style": {"enabled": True},
+                "random_seed": 0,
+            }
+        if args[:2] == ("playlists", "min_track_duration_seconds"):
+            return kwargs.get("default", 46)
+        if args[:2] == ("playlists", "tracks_per_playlist"):
+            return 30
+        return {}
+
+    gen.config.get.side_effect = _cfg_get
+
+    class _StubBundle:
+        artist_keys = ["artist a"] * 5
+        track_ids = [f"t{i}" for i in range(5)]
+        track_titles = [f"Track {i}" for i in range(5)]
+        track_artists = ["Artist A"] * 5
+
+    monkeypatch.setattr(
+        "src.playlist_generator.load_artifact_bundle",
+        lambda *a, **k: _StubBundle(),
+    )
+    monkeypatch.setattr(gen, "_maybe_generate_ds_playlist", lambda **k: [], raising=False)
+    monkeypatch.setattr(gen, "_post_order_validate_ds_output", lambda **k: None, raising=False)
+    monkeypatch.setattr(gen, "_print_playlist_report", lambda **k: None, raising=False)
+
+    captured: Dict[str, Any] = {}
+
+    def _capture(**kwargs):
+        captured.update(kwargs)
+        # Minimally valid so the code immediately after the call (order_clusters,
+        # reorder_avoiding_low_support_terminal) doesn't blow up before this test's
+        # one assertion is even reachable -- see module note above for why the
+        # method isn't expected to complete cleanly beyond that.
+        import numpy as _np
+        X_norm = _np.array([[1.0, 0.0], [0.0, 1.0]])
+        return [[0, 1]], [0, 1], [[0, 1]], X_norm, {0: 1.0, 1: 1.0}
+
+    monkeypatch.setattr("src.playlist_generator.cluster_artist_tracks", _capture)
+
+    artist_seeds = {"Artist A": [{"rating_key": "t0", "title": "Track 0", "genres": []}]}
+    try:
+        gen._create_playlists_from_single_artists(artist_seeds, history=[])
+    except Exception:
+        pass  # see module note: only the capture below is asserted on
+
+    assert captured, "cluster_artist_tracks was never called on the history-mode path"
+    assert captured.get("min_pier_duration_seconds") == 46, (
+        "history-mode pier selection must pass the same duration floor as the "
+        f"single-artist and multi-artist paths; got kwargs={captured}"
+    )

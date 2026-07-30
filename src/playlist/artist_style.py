@@ -838,7 +838,7 @@ def cluster_artist_tracks(
     bridgeability_eligible_mask: Optional[np.ndarray] = None,
     overlap_affinity: Optional[np.ndarray] = None,
     overlap_weight: float = 0.0,
-    min_pier_duration_seconds: Optional[int] = None,
+    min_pier_duration_seconds: Optional[int] = 46,
 ) -> Tuple[List[List[int]], List[int], List[List[int]], np.ndarray, Dict[int, float]]:
     """Cluster artist tracks in sonic space and return clusters + medoids.
 
@@ -853,13 +853,30 @@ def cluster_artist_tracks(
     which only demotes): any candidate under this many seconds is dropped from
     ``artist_indices`` before clustering, so sub-minimum fragments -- vocal
     outtakes, intros, skits -- can never seat as a pier regardless of how the
-    medoid score ranks them. This is the single choke point both the
-    single-artist and multi-artist pier-selection callers route through, so
-    the gate cannot be bypassed by a future caller that forgets its own
-    pre-filter (see docs/superpowers/specs/2026-07-29-multi-artist-blend-design.md
-    duration-gate addendum). Mirrors the min-duration half of
+    medoid score ranks them. This is the single choke point every current
+    pier-selection caller (single-artist, multi-artist, genre mode, and
+    history mode) routes through, so the gate cannot be bypassed by a future
+    caller that forgets its own pre-filter (see
+    docs/superpowers/specs/2026-07-29-multi-artist-blend-design.md duration-gate
+    addendum). Mirrors the min-duration half of
     ``genre_mode.filter_member_indices_by_duration`` (unknown/zero duration
     means "unknown", not "invalid", and is kept).
+
+    The default is ``46`` -- the same fallback every other reader of
+    ``playlists.min_track_duration_seconds`` in this codebase uses when the key
+    is absent -- not ``None``. A coordinator review (2026-07-30) found a third,
+    pre-existing call site (history mode) that had been missed by the initial
+    fix specifically because the parameter defaulted to inert; a real, safe
+    floor as the default means a *future* fifth call site that forgets this
+    parameter entirely is still gated, rather than silently reopening the exact
+    bug this parameter exists to close. Every current caller still passes the
+    live config value explicitly (never relies on this literal), so the
+    default only matters as a safety net, and it can never relax a caller's
+    own tighter/looser explicit choice. ``None`` remains available as an
+    explicit, intentional opt-out (see
+    ``test_min_pier_duration_seconds_explicit_none_disables_the_gate``) --
+    nothing in this codebase currently needs it, but the capability is not
+    removed.
     """
     track_ids = bundle.track_ids
     if bundle.artist_keys is None:

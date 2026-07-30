@@ -3167,6 +3167,14 @@ class PlaylistGenerator:
             # contaminants' neighbourhoods and certify them (spec §1.2). Measured
             # on reggae: that mask passed 8941/43547 rows and vetoed 0 of 206.
             bridgeability_eligible_mask=genre_mode.pool_membership_mask(bundle, pool_ids),
+            # member_indices was already duration-filtered above (_min_dur, same
+            # config key) before clustering, so this is belt-and-suspenders, not
+            # load-bearing -- passed explicitly (the real live value, not the
+            # function's own hardcoded default) rather than left to rely on
+            # cluster_artist_tracks's fallback, so a future change to either the
+            # pre-filter or the default can't quietly drift out of sync
+            # (coordinator review 2026-07-30).
+            min_pier_duration_seconds=_min_dur,
         )
 
         # --- Pier-bridgeability veto (spec §3.4, mechanism 1) ---
@@ -3563,6 +3571,17 @@ class PlaylistGenerator:
 
         playlists = []
 
+        # Hard minimum-duration gate on PIER candidacy (coordinator review
+        # 2026-07-30): this history-mode path was found to be the one call
+        # site into cluster_artist_tracks that the pier-duration-gate fix
+        # left unguarded -- a sub-minimum fragment could still seat as a pier
+        # here even though the single-artist and multi-artist Artist-mode
+        # paths were already closed. Same config key those two paths read;
+        # no new knob.
+        _min_pier_duration_seconds = int(
+            self.config.get("playlists", "min_track_duration_seconds", default=46)
+        )
+
         # Pre-order recency exclusions (applied via DS `excluded_track_ids`).
         # IMPORTANT: No recency filtering is allowed after DS ordering.
         excluded_ids_batch: Set[str] = set()
@@ -3714,6 +3733,7 @@ class PlaylistGenerator:
                         random_seed=ds_cfg.get("random_seed", 0),
                         medoid_top_k=medoid_top_k,
                         target_pier_count=target_pier_count,
+                        min_pier_duration_seconds=_min_pier_duration_seconds,
                     )
                     if not medoids:
                         raise ValueError("Style clustering returned no medoids")
