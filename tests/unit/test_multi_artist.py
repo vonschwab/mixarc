@@ -11,12 +11,13 @@ from dataclasses import dataclass as _dc
 import numpy as np
 import pytest
 
-from src.playlist.artist_style import ArtistStyleConfig
+from src.playlist.artist_style import ArtistStyleConfig, _select_k
 from src.playlist.multi_artist import (
     ArtistGroup,
     MultiArtistBlendFailed,
     MultiArtistConfig,
     MultiArtistPiers,
+    _blocked_artist_keys,
     allocate_pier_budget,
     group_genre_profiles,
     group_prototypes,
@@ -772,3 +773,192 @@ def test_joint_only_chip_still_blends_and_is_blocked():
         "the joint-only artist must still be blocked from bridge interiors"
     )
     assert normalize_artist_key("B") in out.blocked_artist_keys
+
+
+# ── Coordinator review 2026-07-30: findings 1, 6, 7, 8, 10 ──────────────────
+
+
+def test_blocked_artist_keys_use_the_identity_keys_space():
+    """Review Finding 1: _blocked_artist_keys used to key chip names via
+    normalize_artist_key (punctuation-only), but the consumer --
+    pier_bridge_builder._row_ok, via _derive_seed_artist_keys's default
+    derivation -- compares candidate rows through
+    identity_keys_for_index(...).artist_key, which normalizes through
+    normalize_primary_artist_key (ensemble-suffix and collaboration
+    stripping). "Bill Evans Trio" is in the MISMATCH class verified against
+    the real library: normalize_artist_key keeps the ensemble suffix
+    ("bill evans trio"), which never matches a real "Bill Evans Trio" row's
+    actual identity key ("bill evans") -- silently making
+    disallow_seed_artist_in_interiors inert for this chip. Every fixture name
+    used elsewhere in this test module ("A", "B", "Brian Eno", ...) happens to
+    be identical in both key spaces, which is why the suite stayed green while
+    this was broken.
+    """
+    from src.playlist.identity_keys import normalize_primary_artist_key
+    from src.string_utils import normalize_artist_key
+
+    groups = [
+        ArtistGroup(label="Bill Evans Trio", indices=[0, 1], is_joint=False),
+        ArtistGroup(label="Miles Davis", indices=[2, 3], is_joint=False),
+    ]
+    blocked = _blocked_artist_keys(groups)
+
+    assert normalize_primary_artist_key("Bill Evans Trio") in blocked
+    assert "bill evans" in blocked, f"expected the row-space key, got {blocked}"
+    old_wrong_key = normalize_artist_key("Bill Evans Trio")
+    assert old_wrong_key not in blocked, (
+        f"the OLD (wrong) key space must not appear: {old_wrong_key!r} in {blocked}"
+    )
+
+
+def test_k_predict_matches_the_select_k_heuristic_not_the_raw_ceiling():
+    """Review Finding 6: k_predict must predict the SAME k cluster_artist_tracks
+    actually uses (_select_k(len(g.indices), style_cfg)) -- min(cluster_k_max,
+    len(g.indices)) directly over-predicts k for any group thinner than the
+    ceiling, which under-predicts medoid_top_k and makes cluster_artist_tracks
+    seat fewer piers than requested, reported back as a false 'dropped N
+    piers' scarcity."""
+    import math
+
+    import src.playlist.artist_style as art_mod
+
+    b = _blend_bundle()  # group "A" has 5 tracks
+    style_cfg = ArtistStyleConfig(
+        enabled=True, pier_bridgeability_enabled=False,
+        cluster_k_min=3, cluster_k_max=6, cluster_k_heuristic_enabled=True,
+    )
+    captured = []
+    real_cluster_artist_tracks = art_mod.cluster_artist_tracks
+
+    def spy(**kwargs):
+        captured.append(kwargs)
+        return real_cluster_artist_tracks(**kwargs)
+
+    import unittest.mock as mock
+    with mock.patch.object(art_mod, "cluster_artist_tracks", side_effect=spy):
+        select_multi_artist_piers(
+            bundle=b, artist_names=["A", "B"], style_cfg=style_cfg,
+            ma_cfg=MultiArtistConfig(), track_count=30, max_artist_fraction=0.125,
+        )
+    a_call = next(c for c in captured if c["artist_name"] == "A")
+    expected_k = _select_k(5, style_cfg)
+    assert expected_k != min(int(style_cfg.cluster_k_max), 5), (
+        "fixture assumption changed -- pick cfg/group size where the two "
+        "formulas actually diverge"
+    )
+    expected_medoid_top_k = max(1, math.ceil(a_call["target_pier_count"] / expected_k))
+    assert a_call["medoid_top_k"] == expected_medoid_top_k, (
+        f"k_predict must use _select_k({5}, cfg)={expected_k}, not "
+        f"min(cluster_k_max, 5)={min(int(style_cfg.cluster_k_max), 5)}"
+    )
+
+
+def test_bridgeability_excluded_indices_spans_every_group():
+    """Review Finding 7: the pier-bridgeability veto's same-artist exclusion
+    set must span every group in the blend, not just the current group's own
+    -- otherwise another chip's rows (which can never serve as bridge fill
+    once disallow_seed_artist_in_interiors blocks every chip key) get counted
+    as valid bridge neighbours."""
+    import unittest.mock as mock
+
+    import src.playlist.artist_style as art_mod
+
+    b = _blend_bundle()  # 5 A (0-4), 5 B (5-9), 2 joint (10-11)
+    captured = []
+    real_cluster_artist_tracks = art_mod.cluster_artist_tracks
+
+    def spy(**kwargs):
+        captured.append(kwargs)
+        return real_cluster_artist_tracks(**kwargs)
+
+    with mock.patch.object(art_mod, "cluster_artist_tracks", side_effect=spy):
+        select_multi_artist_piers(
+            bundle=b, artist_names=["A", "B"],
+            style_cfg=ArtistStyleConfig(enabled=True, pier_bridgeability_enabled=False),
+            ma_cfg=MultiArtistConfig(), track_count=30, max_artist_fraction=0.125,
+        )
+    a_call = next(c for c in captured if c["artist_name"] == "A")
+    b_call = next(c for c in captured if c["artist_name"] == "B")
+    assert a_call["bridgeability_excluded_indices"] is not None
+    a_excluded = set(int(i) for i in a_call["bridgeability_excluded_indices"])
+    b_excluded = set(int(i) for i in b_call["bridgeability_excluded_indices"])
+    # A's own exclusion set must reach beyond its own indices (0-4) into B's
+    # (5-9) and the joint group's (10-11).
+    assert a_excluded >= set(range(5, 12)), (
+        f"A's bridgeability exclusion set must include B + joint rows, got {a_excluded}"
+    )
+    assert b_excluded >= set(range(0, 5)) | set(range(10, 12)), (
+        f"B's bridgeability exclusion set must include A + joint rows, got {b_excluded}"
+    )
+
+
+def test_support_by_index_is_merged_across_groups_and_exposed():
+    """Review Finding 8: cluster_artist_tracks already computes within-artist
+    support for its own group's candidates -- select_multi_artist_piers used
+    to discard it (`_support`). It must be merged across every group and
+    exposed on MultiArtistPiers so the caller (playlist_generator.py) can run
+    the same arc-aware terminal-avoidance reorder the single-artist tail
+    applies (reorder_avoiding_low_support_terminal)."""
+    b = _blend_bundle()
+    out = select_multi_artist_piers(
+        bundle=b, artist_names=["A", "B"],
+        style_cfg=ArtistStyleConfig(enabled=True, pier_bridgeability_enabled=False),
+        ma_cfg=MultiArtistConfig(), track_count=30, max_artist_fraction=0.125,
+    )
+    assert out.support_by_index, "support_by_index must be populated, not left empty"
+    assert set(out.ordered_medoids) <= set(out.support_by_index), (
+        "every seated pier must have a recorded support score"
+    )
+
+
+def test_group_medoids_are_sonic_sequenced_before_capping():
+    """Review Finding 10: `chosen = list(medoids)[:want]` used to truncate in
+    RAW k-means cluster order. This group's own candidate medoids must be
+    ordered in sonic space FIRST (order_clusters -- the same primitive
+    playlist_generator._cap_order uses for the single-artist path), THEN
+    capped to `want`, so a well-connected medoid from a later cluster index
+    is not dropped in favor of a poorly-connected one from an earlier index.
+    """
+    import unittest.mock as mock
+
+    import src.playlist.artist_style as art_mod
+
+    # Group "A"'s 3 candidate medoids (rows 0-2), in a raw cluster order that
+    # is deliberately misleading: row 1 is FAR from row 0 (row 0's true
+    # nearest neighbour is row 2, which comes LAST in raw order). Rows 3-4
+    # belong to group "B".
+    X = np.array([
+        [1.0, 0.0],
+        [0.0, 1.0],
+        [0.95, 0.05],
+        [0.0, -1.0],
+        [-1.0, 0.0],
+    ])
+    b = _sonic_bundle(["A", "A", "A", "B", "B"], X.tolist())
+    b.durations_ms = np.full(5, 240_000.0)
+    X_norm_a = X / np.linalg.norm(X, axis=1, keepdims=True)
+
+    real_cluster_artist_tracks = art_mod.cluster_artist_tracks
+
+    def fake_cluster_artist_tracks(*, artist_name, target_pier_count, **kwargs):
+        if artist_name == "A":
+            medoids = [0, 1, 2]  # raw cluster order: 0, 1 (far), 2 (close-but-last)
+            return [medoids], medoids, [medoids], X_norm_a, {i: 1.0 for i in medoids}
+        return real_cluster_artist_tracks(
+            artist_name=artist_name, target_pier_count=target_pier_count, **kwargs
+        )
+
+    with mock.patch.object(art_mod, "cluster_artist_tracks", side_effect=fake_cluster_artist_tracks):
+        out = select_multi_artist_piers(
+            bundle=b, artist_names=["A", "B"],
+            style_cfg=ArtistStyleConfig(enabled=True, pier_bridgeability_enabled=False),
+            ma_cfg=MultiArtistConfig(), track_count=16, max_artist_fraction=0.125,
+        )
+    a_group = next(g for g in out.groups if g.label == "A")
+    assert len(a_group.indices) == 3, "fixture assumption changed -- update the test"
+    a_piers = set(out.ordered_medoids) & {0, 1, 2}
+    assert a_piers == {0, 2}, (
+        f"expected A's sonically-nearest pair (row 0's true neighbour, row 2) to "
+        f"survive the cap, got {a_piers} -- raw-cluster-order slicing would wrongly "
+        f"keep {{0, 1}}"
+    )

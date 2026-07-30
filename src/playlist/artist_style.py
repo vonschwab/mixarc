@@ -837,6 +837,7 @@ def cluster_artist_tracks(
     restrict_to_track_ids: Optional[set[str]] = None,
     member_indices: Optional[List[int]] = None,
     bridgeability_eligible_mask: Optional[np.ndarray] = None,
+    bridgeability_excluded_indices: Optional[Sequence[int]] = None,
     overlap_affinity: Optional[np.ndarray] = None,
     overlap_weight: float = 0.0,
     min_pier_duration_seconds: Optional[int] = DEFAULT_MIN_TRACK_DURATION_SECONDS,
@@ -885,6 +886,18 @@ def cluster_artist_tracks(
     ``test_min_pier_duration_seconds_explicit_none_disables_the_gate``) --
     nothing in this codebase currently needs it, but the capability is not
     removed.
+
+    ``bridgeability_excluded_indices``, when given, replaces the derived
+    same-artist exclusion set for the pier-bridgeability veto wholesale
+    (coordinator review Finding 7). Without it, the exclusion set is derived
+    from ``member_indices`` (this group's own rows only) or ``artist_name`` --
+    correct for genre mode's single member set, but wrong for a multi-artist
+    blend: every chip is blocked from EVERY OTHER chip's interiors
+    (``disallow_seed_artist_in_interiors``), so a candidate whose only
+    "eligible" k-th neighbour is another chip's track is not actually
+    bridgeable, yet the derived-from-`member_indices` set only excluded this
+    one group's own rows and let the other chip(s) count. The caller passes
+    the union of every group's indices here to close that gap.
     """
     track_ids = bundle.track_ids
     if bundle.artist_keys is None:
@@ -1027,7 +1040,11 @@ def cluster_artist_tracks(
         _cal_c, _cal_s, _cal_g = resolve_transition_calib(
             getattr(bundle, "sonic_variant", None)
         )
-        if member_indices is not None:
+        if bridgeability_excluded_indices is not None:
+            # Multi-artist blend: caller-supplied exclusion set spanning every
+            # group, not just this one (Finding 7 -- see the docstring above).
+            _excl_cols = [int(i) for i in bridgeability_excluded_indices]
+        elif member_indices is not None:
             # Genre mode: exclude the caller's own member set. Re-deriving from
             # artist_name would return [] (the label matches no artist key), which
             # silently removes the veto's self-exclusion and lets a track look

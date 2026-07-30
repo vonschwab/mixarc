@@ -1654,6 +1654,42 @@ def test_member_indices_bridgeability_excludes_member_set_not_artist_name(monkey
     assert captured["excluded"] == [0, 1, 2, 3, 4, 5]
 
 
+def test_bridgeability_excluded_indices_overrides_member_indices_derivation(monkeypatch):
+    """Coordinator review Finding 7 (multi-artist blend): a caller can supply
+    an exclusion set that spans MORE than its own member_indices -- e.g. the
+    multi-artist blend's per-group cluster_artist_tracks call needs to exclude
+    every group in the blend, not just its own -- and it must be used
+    verbatim instead of the member_indices-derived default. Without this
+    override, a blend's per-group call only excluded its own group's rows,
+    letting another chip's tracks (which can never actually serve as bridge
+    fill once disallow_seed_artist_in_interiors blocks every chip key) count
+    as valid bridge neighbours."""
+    import src.playlist.artist_style as art
+
+    real_compute = art.compute_pier_bridgeability
+    captured = {}
+
+    def _spy(X_norm, member_indices_arg, excluded_indices, k, **kwargs):
+        captured["excluded"] = sorted(int(i) for i in excluded_indices)
+        return real_compute(X_norm, member_indices_arg, excluded_indices, k, **kwargs)
+
+    monkeypatch.setattr(art, "compute_pier_bridgeability", _spy)
+
+    bundle = _member_indices_fixture()
+    cfg = art.ArtistStyleConfig(pier_bridgeability_enabled=True, dedupe_versions=False)
+    art.cluster_artist_tracks(
+        bundle=bundle, artist_name="[blend:a]", cfg=cfg,
+        member_indices=[0, 1, 2],  # this group's own rows only
+        bridgeability_excluded_indices=[0, 1, 2, 3, 4, 5],  # the WHOLE blend
+        target_pier_count=1,
+    )
+    assert "excluded" in captured, "compute_pier_bridgeability was never called"
+    assert captured["excluded"] == [0, 1, 2, 3, 4, 5], (
+        "bridgeability_excluded_indices must be used verbatim, not just this "
+        "group's own member_indices"
+    )
+
+
 def test_overlap_affinity_reranks_medoids_independently_of_tag_weight():
     """The overlap term must act even when medoid_tag_weight is 0 (tag steering
     off). Regression guard for the 'configured knob that can't act' failure mode.

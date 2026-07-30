@@ -15,7 +15,7 @@ docs/POOL_STARVATION_RESEARCH_2026-07-12.md.)
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
@@ -494,6 +494,15 @@ class MultiArtistPiers:
     groups: List[ArtistGroup]
     mean_affinity: float
     blocked_artist_keys: frozenset
+    # Merged within-artist support (compute_within_artist_support, keyed by
+    # bundle index) across every group's own cluster_artist_tracks call.
+    # Previously computed and thrown away per-group (review Finding 8) --
+    # exposed so the caller can run the same arc-aware terminal-avoidance
+    # reorder the single-artist tail applies (reorder_avoiding_low_support_
+    # terminal), instead of the blend silently skipping it. Defaults to {}
+    # so existing call sites that construct MultiArtistPiers without it keep
+    # working.
+    support_by_index: Dict[int, float] = field(default_factory=dict)
 
 
 def _blocked_artist_keys(groups: Sequence[ArtistGroup]) -> frozenset:
@@ -514,9 +523,26 @@ def _blocked_artist_keys(groups: Sequence[ArtistGroup]) -> frozenset:
     comprehension, so the result is never anything else; the caller-side assert
     checks the thing that can actually go wrong (a non-string element slipping
     in), not the vacuously-true fact that a frozenset() call returns a frozenset.
+
+    KEY SPACE (review Finding 1): the consumer of this override,
+    ``pier_bridge_builder._row_ok``, compares each candidate row's key via
+    ``identity_keys_for_index(bundle, idx).artist_key`` -- which normalizes
+    through ``normalize_primary_artist_key`` (ensemble-suffix and
+    collaboration stripping, e.g. "Bill Evans Trio" -> "bill evans",
+    "Godspeed You! Black Emperor" kept intact because "!" is not
+    collaboration/ensemble punctuation). The DEFAULT derivation in
+    ``_derive_seed_artist_keys`` already uses that exact function. This
+    override path must produce keys in the SAME space -- using the plainer
+    ``normalize_artist_key`` (punctuation-only, no ensemble/collaboration
+    stripping) here silently produced a DIFFERENT key for any chip name that
+    ensemble/collaboration-stripping changes (e.g. "Bill Evans Trio" ->
+    "bill evans trio" vs the row space's "bill evans"), which never matched
+    at ``_row_ok`` and made ``disallow_seed_artist_in_interiors`` a no-op for
+    that chip -- entirely inert on the fixture names ("Brian Eno", "Harold
+    Budd", ...) that happen to be identical in both key spaces, which is why
+    the test suite stayed green while the guarantee was silently broken.
     """
-    from src.string_utils import normalize_artist_key
-    from src.playlist.artist_aliases import resolve_alias
+    from src.playlist.identity_keys import normalize_primary_artist_key
 
     chip_names: List[str] = []
     for g in groups:
@@ -526,7 +552,8 @@ def _blocked_artist_keys(groups: Sequence[ArtistGroup]) -> frozenset:
             chip_names.append(g.label)
 
     return frozenset(
-        resolve_alias(normalize_artist_key(n)) for n in chip_names
+        key for key in (normalize_primary_artist_key(n) for n in chip_names if n)
+        if key
     )
 
 
@@ -622,7 +649,7 @@ def select_multi_artist_piers(
     """
     import math
 
-    from src.playlist.artist_style import cluster_artist_tracks
+    from src.playlist.artist_style import cluster_artist_tracks, order_clusters, _select_k
 
     names = [str(a).strip() for a in artist_names if str(a).strip()]
     if len(names) > ma_cfg.max_artists:
@@ -729,7 +756,19 @@ def select_multi_artist_piers(
     all_medoids: List[int] = []
     group_of_index: Dict[int, str] = {}
     affinity_by_index: Dict[int, float] = {}
+    support_by_index: Dict[int, float] = {}
     X_norm_shared: Optional[np.ndarray] = None
+    # Review Finding 7: every group's own rows must be excluded from every
+    # OTHER group's pier-bridgeability neighbour count, not just the group's
+    # own. The blend sets disallow_seed_artist_in_interiors=True for EVERY
+    # chip key (playlist_generator.py), so a candidate whose only "eligible"
+    # k-th neighbour is another chip's track (or the joint group's) is not
+    # actually bridgeable -- that neighbour can never serve as bridge fill.
+    # member_indices=g.indices alone only excludes THIS group's own rows from
+    # cluster_artist_tracks's default derivation, leaving the other chip(s)
+    # countable as valid neighbours. Passing the union of every group's
+    # indices as bridgeability_excluded_indices closes that gap.
+    _all_group_indices = [i for gr in groups for i in gr.indices]
 
     for g in groups:
         want = int(alloc.get(g.label, 0))
@@ -756,7 +795,15 @@ def select_multi_artist_piers(
         aff = overlap_affinity(
             bundle, g, groups, protos, genre_profiles, genre_share=ma_cfg.genre_share,
         )
-        k_predict = max(1, min(int(style_cfg.cluster_k_max), len(g.indices)))
+        # Review Finding 6: predict the SAME k cluster_artist_tracks is about
+        # to pick. style_cfg.cluster_k_max alone under-predicts k for any
+        # group thinner than the ceiling (the single-artist path's own
+        # prediction below in playlist_generator.py already uses
+        # _select_k(track_count, cfg) for exactly this reason) -- using the
+        # ceiling directly here over-produces medoid_top_k, which then makes
+        # cluster_artist_tracks return MORE medoids than `want` while this
+        # function reports a false "dropped N piers" scarcity.
+        k_predict = max(1, _select_k(len(g.indices), style_cfg))
         try:
             clusters, medoids, _by_cluster, X_norm, _support = cluster_artist_tracks(
                 bundle=bundle,
@@ -768,6 +815,7 @@ def select_multi_artist_piers(
                 metadata_db_path=metadata_db_path,
                 target_pier_count=want,
                 member_indices=list(g.indices),
+                bridgeability_excluded_indices=_all_group_indices,
                 overlap_affinity=aff,
                 overlap_weight=ma_cfg.overlap_weight,
                 min_pier_duration_seconds=min_pier_duration_seconds,
@@ -802,7 +850,15 @@ def select_multi_artist_piers(
             })
             continue
         X_norm_shared = X_norm
-        chosen = list(medoids)[:want]
+        support_by_index.update(_support)
+        # Review Finding 10: sequence this group's own candidates in sonic
+        # space BEFORE capping to `want`. Slicing `medoids` (raw k-means
+        # cluster-index order) can keep two medoids from adjacent, poorly-
+        # connected clusters while dropping a better-connected one from a
+        # cluster later in k-means's arbitrary centroid order.
+        # playlist_generator._cap_order exists for exactly this reason and
+        # every single-artist branch uses it before capping.
+        chosen = order_clusters(list(medoids), X_norm)[:want]
         for m in chosen:
             group_of_index[int(m)] = g.label
             affinity_by_index[int(m)] = float(aff[int(m)])
@@ -896,4 +952,5 @@ def select_multi_artist_piers(
         groups=groups,
         mean_affinity=mean_affinity,
         blocked_artist_keys=blocked,
+        support_by_index=support_by_index,
     )
