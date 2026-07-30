@@ -14,6 +14,7 @@ import pytest
 from src.playlist.artist_style import ArtistStyleConfig
 from src.playlist.multi_artist import (
     ArtistGroup,
+    MultiArtistBlendFailed,
     MultiArtistConfig,
     MultiArtistPiers,
     allocate_pier_budget,
@@ -538,6 +539,24 @@ def _blend_bundle():
     return b
 
 
+def test_orchestrator_raises_loudly_on_missing_x_sonic_not_as_a_thin_group():
+    """Coordinator review Finding 1: cluster_artist_tracks raises ValueError
+    for FOUR different reasons, only two of which (too-few-tracks, degenerate
+    clustering) are genuinely per-group. A missing X_sonic/artist_keys is an
+    artifact-integrity problem, not "this artist is thin", and must never be
+    caught by the per-group try/except and reported to the user as a
+    thin-group relaxation -- it must raise immediately, before any group is
+    even attempted."""
+    b = _blend_bundle()
+    b.X_sonic = None
+    with pytest.raises(ValueError, match="X_sonic"):
+        select_multi_artist_piers(
+            bundle=b, artist_names=["A", "B"],
+            style_cfg=ArtistStyleConfig(enabled=True, pier_bridgeability_enabled=False),
+            ma_cfg=MultiArtistConfig(), track_count=30, max_artist_fraction=0.125,
+        )
+
+
 def test_orchestrator_returns_none_below_two_groups():
     b = _blend_bundle()
     out = select_multi_artist_piers(
@@ -562,6 +581,49 @@ def test_orchestrator_seats_both_artists_and_the_joint_group():
     assert len(out.blocked_artist_keys) >= 2
 
 
+def test_orchestrator_reports_the_thin_joint_group_by_name():
+    """Coordinator review Finding 3: the 2-track 'A and B' joint group in
+    _blend_bundle is below cluster_k_min=3 in EVERY orchestrator test above,
+    so the except-ValueError branch added to keep a thin group from crashing
+    the whole blend fires on every single run -- but nothing asserted on its
+    output. Pin the relaxation it must produce: naming the joint group and
+    explaining why it contributed no piers."""
+    b = _blend_bundle()
+    out = select_multi_artist_piers(
+        bundle=b, artist_names=["A", "B"],
+        style_cfg=ArtistStyleConfig(enabled=True, pier_bridgeability_enabled=False),
+        ma_cfg=MultiArtistConfig(), track_count=30, max_artist_fraction=0.125,
+    )
+    thin = [r for r in out.relaxations if r.get("bridge") == "A & B"]
+    assert thin, f"expected a relaxation naming the joint group, got {out.relaxations}"
+    assert any("too few to cluster" in s for s in thin[0]["relaxed"])
+
+
+def test_orchestrator_raises_with_relaxations_when_every_group_fails_to_cluster():
+    """Coordinator review Finding 2: >=2 groups survive partition (so this is
+    NOT the <2-groups fallback) but every one is too thin to cluster -- e.g.
+    two obscure chips with 1-2 tracks each and no joint catalog. Returning
+    None here would reuse the same signal as "no attempt was made" and
+    silently discard the relaxations already collected. select_multi_artist_
+    piers must instead raise MultiArtistBlendFailed carrying every relaxation
+    collected so far, so a caller can surface WHY before falling back."""
+    artists = ["A", "A", "B"]  # A: 2 tracks, B: 1 track, no joint overlap
+    sonic = [[1.0, 0.0], [0.95, 0.05], [0.0, 1.0]]
+    b = _sonic_bundle(artists, sonic)
+    b.durations_ms = np.full(len(artists), 240000, dtype=float)
+
+    with pytest.raises(MultiArtistBlendFailed) as excinfo:
+        select_multi_artist_piers(
+            bundle=b, artist_names=["A", "B"],
+            style_cfg=ArtistStyleConfig(enabled=True, pier_bridgeability_enabled=False),
+            ma_cfg=MultiArtistConfig(), track_count=30, max_artist_fraction=0.125,
+        )
+    relaxations = excinfo.value.relaxations
+    assert len(relaxations) >= 2, "both thin groups must be individually reported"
+    assert any(r.get("bridge") == "A" for r in relaxations)
+    assert any(r.get("bridge") == "B" for r in relaxations)
+
+
 def test_orchestrator_reports_a_dropped_chip():
     b = _blend_bundle()
     out = select_multi_artist_piers(
@@ -581,5 +643,9 @@ def test_orchestrator_reports_low_overlap():
         ma_cfg=MultiArtistConfig(low_overlap_threshold=99.0),
         track_count=30, max_artist_fraction=0.125,
     )
-    assert any("share little" in str(r).lower() or "overlap" in str(r).lower()
+    # Coordinator review Finding 4: the relaxation renders as
+    # "Relaxed to fit: {bridge} — dropped {relaxed}" in the real UI, so the
+    # copy lives in "bridge"/"relaxed" as a short label + noun phrase, not a
+    # free-text sentence -- check the fields the renderer actually reads.
+    assert any("middle ground" in str(r).lower() or "affinity" in str(r).lower()
                for r in out.relaxations)

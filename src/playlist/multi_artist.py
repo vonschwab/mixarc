@@ -487,6 +487,42 @@ class MultiArtistPiers:
     blocked_artist_keys: frozenset
 
 
+def _blocked_artist_keys(exclusive: Sequence[ArtistGroup]) -> frozenset:
+    """Artist keys for every exclusive (non-joint) group, resolved through aliases.
+
+    Becomes pier_bridge_builder._derive_seed_artist_keys's ``override``, which
+    does ``frozenset(str(k) for k in override if k)`` -- handing it a bare
+    string would silently iterate CHARACTERS. Built directly as a frozenset
+    comprehension, so the result is never anything else; the caller-side assert
+    checks the thing that can actually go wrong (a non-string element slipping
+    in), not the vacuously-true fact that a frozenset() call returns a frozenset.
+    """
+    from src.string_utils import normalize_artist_key
+    from src.playlist.artist_aliases import resolve_alias
+
+    return frozenset(
+        resolve_alias(normalize_artist_key(g.label)) for g in exclusive
+    )
+
+
+class MultiArtistBlendFailed(RuntimeError):
+    """>=2 groups survived partition, but every one was too thin to cluster.
+
+    Distinct from ``select_multi_artist_piers`` returning ``None`` (fewer than
+    two groups survived partition -- nothing to explain, the caller silently
+    runs the single-artist path). This is a real attempt that failed, and the
+    relaxations already collected (dropped chips, per-group thin-cluster
+    failures) must not vanish with it -- see the Finding 2 discussion in
+    task-9-report.md. Callers should catch this, fold ``.relaxations`` into
+    whatever they show the user, and then fall back to single-artist
+    generation exactly as they would for a ``None`` return.
+    """
+
+    def __init__(self, message: str, relaxations: List[Dict[str, Any]]):
+        super().__init__(message)
+        self.relaxations = relaxations
+
+
 def select_multi_artist_piers(
     *,
     bundle,
@@ -502,21 +538,36 @@ def select_multi_artist_piers(
 ) -> Optional[MultiArtistPiers]:
     """Pick and order the piers for a 2+ artist blend.
 
-    Returns None when fewer than two groups survive -- the caller then runs the
-    normal single-artist path unchanged.
+    Returns None when fewer than two groups survive partition -- the caller
+    then runs the normal single-artist path unchanged, with nothing to explain.
+
+    Raises MultiArtistBlendFailed when two or more groups DID survive
+    partition but every one of them was too thin to cluster (e.g. two obscure
+    chips with 1-2 tracks each and no joint catalog) -- a real attempt that
+    produced zero piers. That is a different situation from "no attempt was
+    made" and must not be silently folded into the same None return (it would
+    discard the dropped-chip / thin-group relaxations already collected and
+    violate the never-fail-on-soft-axes rule: the user must still learn why
+    their blend didn't happen). See task-9-report.md, Finding 2.
+
+    Raises ValueError immediately, before any group is touched, if the
+    artifact itself is missing artist_keys or X_sonic -- that is a data
+    problem, not a "this artist is thin" problem, and must never be
+    misreported to the user as one (Finding 1).
 
     Relaxation entries mirror the shape pier_bridge_builder already emits for the
     ``RelaxationNotice`` component (``web/src/lib/types.ts::RelaxationEntry``):
     ``{"type": "relaxation", "scope": ..., "bridge": str, "relaxed": [str, ...],
-    "severity": str}``. ``bridge`` and ``relaxed`` are rendered verbatim as
-    "Relaxed to fit: {bridge} — dropped {', '.join(relaxed)}"; there is no
-    separate free-text "detail" field in the real renderer.
+    "severity": str}``. The renderer produces exactly
+    "Relaxed to fit: {bridge} — dropped {', '.join(relaxed)}" -- there is no
+    separate free-text "detail" field, so ``bridge`` must be a short label and
+    each ``relaxed`` entry a short noun phrase that reads naturally after the
+    word "dropped" (see task-9-report.md, Finding 4, for the exact rendered
+    sentence of every entry this function emits).
     """
     import math
 
     from src.playlist.artist_style import cluster_artist_tracks
-    from src.string_utils import normalize_artist_key
-    from src.playlist.artist_aliases import resolve_alias
 
     names = [str(a).strip() for a in artist_names if str(a).strip()]
     if len(names) > ma_cfg.max_artists:
@@ -549,6 +600,25 @@ def select_multi_artist_piers(
         )
         return None
 
+    # Artifact-integrity checks, once, up front -- NOT inside the per-group
+    # try/except below. cluster_artist_tracks raises ValueError for four
+    # different reasons (artist_style.py: missing artist_keys L852, missing
+    # X_sonic L855, too-few-tracks L916, degenerate-clustering-after-retries
+    # L1041). Only the last two are per-group conditions; the first two are
+    # properties of the WHOLE artifact and must never be caught and reported
+    # to the user as "this artist has too few tracks" (Finding 1). Checking
+    # them here means they raise loudly, unconditionally, before any group is
+    # touched -- group_prototypes below would also catch a missing X_sonic,
+    # but not missing artist_keys, and not with this function's own voice.
+    if getattr(bundle, "artist_keys", None) is None:
+        raise ValueError(
+            "Multi-artist: artifact missing artist_keys — cannot cluster any group."
+        )
+    if getattr(bundle, "X_sonic", None) is None:
+        raise ValueError(
+            "Multi-artist: artifact missing X_sonic — cannot cluster any group."
+        )
+
     protos = group_prototypes(bundle, groups)
     genre_profiles = group_genre_profiles(bundle, groups)
 
@@ -578,6 +648,16 @@ def select_multi_artist_piers(
         # right behavior is to drop this group's contribution and keep going
         # (design principle 25, "edge cases get graceful fallbacks"), not to
         # crash the whole blend over one thin corner (most often the joint set).
+        #
+        # This catch is intentionally still ValueError, not a narrower
+        # exception: with the artifact-integrity checks hoisted above, the
+        # only two remaining raise sites inside cluster_artist_tracks are
+        # both genuinely per-group conditions -- too-few-tracks (L916) and
+        # degenerate-clustering-after-retries (L1041, all k-means retries
+        # produced <2 non-empty clusters). Both are real, both are about THIS
+        # group's own member data, and the two cannot be told apart without
+        # matching on exception message text, which is more fragile than
+        # treating them the same way here (Finding 1, accepted as documented).
         aff = overlap_affinity(
             bundle, g, groups, protos, genre_profiles, genre_share=ma_cfg.genre_share,
         )
@@ -601,12 +681,15 @@ def select_multi_artist_piers(
                 "Multi-artist: '%s' (%d track(s)) could not be clustered (%s) — "
                 "contributes no piers.", g.label, len(g.indices), exc,
             )
+            _piers_word = "pier" if want == 1 else "piers"
+            _tracks_word = "track" if len(g.indices) == 1 else "tracks"
             relaxations.append({
                 "type": "relaxation",
                 "scope": "multi_artist",
-                "bridge": f"{g.label}'s pier budget",
+                "bridge": g.label,
                 "relaxed": [
-                    f"{g.label} ({len(g.indices)} track(s) — too few to cluster)"
+                    f"{want} {_piers_word} (only {len(g.indices)} {_tracks_word} "
+                    f"in your library — too few to cluster)"
                 ],
                 "severity": "info",
             })
@@ -618,21 +701,47 @@ def select_multi_artist_piers(
             affinity_by_index[int(m)] = float(aff[int(m)])
         all_medoids.extend(int(m) for m in chosen)
         if len(chosen) < want:
+            _short = want - len(chosen)
+            _tracks_word = "track" if len(g.indices) == 1 else "tracks"
+            # "N of M piers" is a ratio phrase -- "piers" stays plural even
+            # when the numerator (dropped count) is 1, same as "1 of 3 items"
+            # reads naturally where "1 of 3 item" would not.
             relaxations.append({
                 "type": "relaxation",
                 "scope": "multi_artist",
-                "bridge": f"{g.label}'s pier budget",
+                "bridge": g.label,
                 "relaxed": [
-                    f"{g.label} ({len(chosen)}/{want} pier(s) seated, "
-                    f"{len(g.indices)} track(s) in your library)"
+                    f"{_short} of {want} piers (only {len(g.indices)} "
+                    f"{_tracks_word} in your library)"
                 ],
                 "severity": "info",
             })
 
     if not all_medoids:
-        logger.warning("Multi-artist: no medoids produced — falling back.")
-        return None
+        # >=2 groups survived partition (checked above), so this is NOT the
+        # "fewer than two groups" case -- every surviving group individually
+        # failed to cluster. Returning None here would reuse the same signal
+        # for two different situations and the relaxations collected so far
+        # (dropped chips, every group's thin-cluster failure) would vanish
+        # with it. Raise instead, carrying them, so a caller can surface WHY
+        # before falling back (Finding 2; see task-9-report.md for the full
+        # rationale and the alternative designs considered).
+        logger.warning(
+            "Multi-artist: %d group(s) survived partition but none could be "
+            "clustered — refusing to silently fall back; raising with %d "
+            "relaxation(s) attached.", len(groups), len(relaxations),
+        )
+        raise MultiArtistBlendFailed(
+            f"Multi-artist: all {len(groups)} surviving group(s) were too thin "
+            "to cluster.",
+            relaxations,
+        )
 
+    assert X_norm_shared is not None, (
+        "all_medoids is non-empty, so at least one cluster_artist_tracks call "
+        "must have succeeded and set X_norm_shared -- a future refactor of the "
+        "loop above must preserve this."
+    )
     ordered, _improved = order_with_alternation(
         all_medoids, X_norm_shared, group_of_index,
         alternation_bonus=ma_cfg.alternation_bonus,
@@ -643,30 +752,26 @@ def select_multi_artist_piers(
         if ordered else 0.0
     )
     if mean_affinity < ma_cfg.low_overlap_threshold:
-        detail = (
-            f"{' & '.join(g.label for g in exclusive)} share little sonic ground "
-            f"(mean pier affinity {mean_affinity:.2f})"
-        )
+        bridge_label = " & ".join(g.label for g in exclusive)
         relaxations.append({
             "type": "relaxation",
             "scope": "multi_artist",
-            "bridge": detail,
-            "relaxed": ["piers stayed characteristic rather than meeting in the middle"],
+            "bridge": bridge_label,
+            "relaxed": [
+                f"the shared middle ground (mean pier affinity "
+                f"{mean_affinity:.2f} — piers kept each artist's own character)"
+            ],
             "severity": "info",
         })
-        logger.warning("Multi-artist: %s", detail)
+        logger.warning(
+            "Multi-artist: %s share little sonic ground (mean pier affinity "
+            "%.2f) — piers stayed characteristic rather than meeting in the "
+            "middle.", bridge_label, mean_affinity,
+        )
 
-    # blocked_artist_keys becomes pier_bridge_builder._derive_seed_artist_keys's
-    # `override`, which does `frozenset(str(k) for k in override if k)` -- handing
-    # it a bare string would silently iterate CHARACTERS. Built directly as a
-    # frozenset comprehension here, so it is never anything else; asserted
-    # defensively because that call site has no such guard of its own.
-    blocked = frozenset(
-        resolve_alias(normalize_artist_key(g.label))
-        for g in exclusive
-    )
-    assert isinstance(blocked, frozenset), (
-        "blocked_artist_keys must be a frozenset of artist keys, never a bare string"
+    blocked = _blocked_artist_keys(exclusive)
+    assert all(isinstance(k, str) for k in blocked), (
+        "blocked_artist_keys must contain only artist-key strings"
     )
 
     logger.info(
