@@ -524,6 +524,8 @@ def _medoids_for_cluster(
     tag_affinity: Optional[np.ndarray] = None,
     support_weight: float = 0.0,
     support_values: Optional[np.ndarray] = None,
+    overlap_weight: float = 0.0,
+    overlap_values: Optional[np.ndarray] = None,
 ) -> List[int]:
     """
     Select medoids using weighted scoring that penalizes duration outliers.
@@ -599,6 +601,19 @@ def _medoids_for_cluster(
             logger.warning(
                 "artist_style: support_values len %d != cluster size %d; skipping support term",
                 sv.shape[0], len(indices),
+            )
+
+    # Multi-artist blend: pull the medoid toward the OTHER named artist(s).
+    # Gated on its own weight -- deliberately NOT on cfg.medoid_tag_weight, so
+    # the blend acts whether or not tag steering is on.
+    if overlap_values is not None and overlap_weight > 0:
+        ov = np.asarray(overlap_values, dtype=float)
+        if ov.shape[0] == len(indices):
+            scores = scores + ov * overlap_weight
+        else:  # defensive: misalignment must never silently corrupt scores
+            logger.warning(
+                "artist_style: overlap_values len %d != cluster size %d; skipping overlap term",
+                ov.shape[0], len(indices),
             )
 
     # Select from top-k by combined score
@@ -821,6 +836,8 @@ def cluster_artist_tracks(
     restrict_to_track_ids: Optional[set[str]] = None,
     member_indices: Optional[List[int]] = None,
     bridgeability_eligible_mask: Optional[np.ndarray] = None,
+    overlap_affinity: Optional[np.ndarray] = None,
+    overlap_weight: float = 0.0,
 ) -> Tuple[List[List[int]], List[int], List[List[int]], np.ndarray, Dict[int, float]]:
     """Cluster artist tracks in sonic space and return clusters + medoids.
 
@@ -1117,6 +1134,9 @@ def cluster_artist_tracks(
                     ci, float(np.max(support_slice)), cfg.pier_support_floor,
                     [str(bundle.track_ids[m]) for m in members_eligible],
                 )
+        overlap_slice: Optional[np.ndarray] = None
+        if overlap_affinity is not None and float(overlap_weight) > 0.0:
+            overlap_slice = np.asarray(overlap_affinity, dtype=float)[members_eligible]
         medoid_list = _medoids_for_cluster(
             X_norm,
             members_eligible,
@@ -1137,6 +1157,8 @@ def cluster_artist_tracks(
             tag_slice,
             cfg.pier_support_demotion_strength if cfg.pier_support_enabled else 0.0,
             support_slice,
+            float(overlap_weight),
+            overlap_slice,
         )
         medoids_by_cluster.append(medoid_list)
         medoids.extend(medoid_list)

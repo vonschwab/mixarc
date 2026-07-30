@@ -1652,3 +1652,46 @@ def test_member_indices_bridgeability_excludes_member_set_not_artist_name(monkey
     )
     assert "excluded" in captured, "compute_pier_bridgeability was never called"
     assert captured["excluded"] == [0, 1, 2, 3, 4, 5]
+
+
+def test_overlap_affinity_reranks_medoids_independently_of_tag_weight():
+    """The overlap term must act even when medoid_tag_weight is 0 (tag steering
+    off). Regression guard for the 'configured knob that can't act' failure mode.
+    """
+    import numpy as np
+    from src.playlist.artist_style import _medoids_for_cluster
+
+    X = np.array([[1.0, 0.0], [0.0, 1.0]])
+    indices = [0, 1]
+    centroid = np.array([1.0, 0.0])   # index 0 is the plain medoid
+    rng = np.random.default_rng(0)
+
+    plain = _medoids_for_cluster(
+        X, indices, centroid, ["t0", "t1"], 1, rng, 1,
+    )
+    assert plain == [0]
+
+    # A strong overlap pull toward index 1 must flip the choice.
+    rng2 = np.random.default_rng(0)
+    pulled = _medoids_for_cluster(
+        X, indices, centroid, ["t0", "t1"], 1, rng2, 1,
+        overlap_weight=5.0,
+        overlap_values=np.array([0.0, 1.0]),
+    )
+    assert pulled == [1], "overlap term did not affect medoid ranking"
+
+
+def test_overlap_weight_zero_is_inert():
+    import numpy as np
+    from src.playlist.artist_style import _medoids_for_cluster
+
+    X = np.array([[1.0, 0.0], [0.0, 1.0]])
+    centroid = np.array([1.0, 0.0])
+    a = _medoids_for_cluster(
+        X, [0, 1], centroid, ["t0", "t1"], 1, np.random.default_rng(0), 1,
+    )
+    b = _medoids_for_cluster(
+        X, [0, 1], centroid, ["t0", "t1"], 1, np.random.default_rng(0), 1,
+        overlap_weight=0.0, overlap_values=np.array([0.0, 1.0]),
+    )
+    assert a == b
