@@ -184,6 +184,35 @@ describe("GenerateControls multi-artist blend", () => {
     expect(payload.artists).toBeUndefined();
   });
 
+  it("shows autocomplete suggestions on an artist chip and picking one fills the chip and reaches the payload", async () => {
+    // Scoped to a "har" prefix so the primary artist input's own autocomplete
+    // (query "Brian Eno", same mocked endpoint) doesn't also surface "Harold
+    // Budd" and create an ambiguous duplicate match for screen.findByText.
+    vi.spyOn(api, "autocomplete").mockImplementation(async (q: string) => ({
+      items: q.toLowerCase().startsWith("har") ? ["Harold Budd"] : [],
+      has_more: false,
+    }));
+    const onSubmit = vi.fn();
+    renderControls({ mode: "artist", onSubmit });
+
+    fireEvent.change(screen.getByPlaceholderText("Artist name…"), { target: { value: "Brian Eno" } });
+    fireEvent.click(screen.getByRole("button", { name: /add artist/i }));
+    const chipInput = screen.getByPlaceholderText(/second artist/i) as HTMLInputElement;
+    fireEvent.focus(chipInput);
+    fireEvent.change(chipInput, { target: { value: "Har" } });
+    await waitFor(() => expect(api.autocomplete).toHaveBeenCalled());
+
+    const suggestion = await screen.findByText("Harold Budd");
+    fireEvent.click(suggestion);
+    expect(chipInput.value).toBe("Harold Budd");
+    // Picking a chip suggestion must not immediately reopen the dropdown.
+    expect(screen.queryByText("Harold Budd", { selector: "li" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /generate/i }));
+    const payload = onSubmit.mock.calls[0][0];
+    expect(payload.artists).toEqual(["Brian Eno", "Harold Budd"]);
+  });
+
   it("clears extra artist chips when leaving artist mode", () => {
     const { rerender } = renderControls({ mode: "artist" });
     fireEvent.click(screen.getByRole("button", { name: /add artist/i }));

@@ -140,6 +140,18 @@ export function GenerateControls({
   const dropdownRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
 
+  // Extra-artist chip autocomplete — ONE shared hook instance across all chips
+  // (React hooks can't be called in a loop). Driven by whichever chip is
+  // currently focused (`activeChip`); `chipSelectedRef` mirrors `selectedRef`
+  // above so picking a suggestion doesn't immediately reopen the dropdown.
+  // Deliberately a separate instance from `artistSearch` — that one's query is
+  // bound to `seed` by an effect below, and sharing would make the two fight
+  // over one query state.
+  const chipSearch = useInfiniteSearch<string>({ fetchPage: api.autocomplete, pageSize: 30 });
+  const [activeChip, setActiveChip] = useState<number | null>(null);
+  const chipSelectedRef = useRef<string | null>(null);
+  const chipDropdownRefs = useRef<Record<number, HTMLElement | null>>({});
+
   // Tag steering (artist mode): the artist's published genres as selectable chips.
   const [artistTags, setArtistTags] = useState<
     { name: string; release_count: number; confidence: number }[]
@@ -162,7 +174,11 @@ export function GenerateControls({
   // separate [mode]-only effect (see declaration above) so typing in `seed`
   // never clears them.
   useEffect(() => {
-    if (mode !== "artist") setExtraArtists([]);
+    if (mode !== "artist") {
+      setExtraArtists([]);
+      chipSearch.reset();
+      setActiveChip(null);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode]);
 
@@ -230,6 +246,33 @@ export function GenerateControls({
     artistSearch.setQuery(seed);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [seed, mode]);
+
+  // Close the chip autocomplete on outside click — mirrors the seed-input
+  // effect above, scoped to whichever chip's wrapper is currently active.
+  useEffect(() => {
+    function onOutside(e: MouseEvent) {
+      if (activeChip === null) return;
+      const wrapper = chipDropdownRefs.current[activeChip];
+      if (wrapper && !wrapper.contains(e.target as Node)) {
+        chipSearch.reset();
+        setActiveChip(null);
+      }
+    }
+    document.addEventListener("mousedown", onOutside);
+    return () => document.removeEventListener("mousedown", onOutside);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeChip]);
+
+  // Drive the shared chip autocomplete from whichever chip is active. Skip
+  // one cycle after a selection (chipSelectedRef) so picking a name doesn't
+  // immediately re-open the dropdown for that chip.
+  useEffect(() => {
+    if (activeChip === null) { chipSearch.reset(); return; }
+    const val = extraArtists[activeChip] ?? "";
+    if (val === chipSelectedRef.current) return; // just selected this name — don't reopen the dropdown
+    chipSearch.setQuery(val);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeChip, extraArtists]);
 
   // Shared visual style for the artist-name input and the genre autocomplete input.
   const inputClassName = "w-full bg-well border border-border rounded text-xs text-text px-2.5 py-[3px]";
@@ -336,13 +379,17 @@ export function GenerateControls({
                 {extraArtists.map((name, i) => (
                   <span
                     key={i}
-                    className="inline-flex items-center gap-1 rounded-full border border-border bg-well pl-2.5 pr-1 py-[3px]"
+                    ref={(el) => { chipDropdownRefs.current[i] = el; }}
+                    className="relative inline-flex items-center gap-1 rounded-full border border-border bg-well pl-2.5 pr-1 py-[3px]"
                   >
                     <input
                       value={name}
-                      onChange={(e) =>
-                        setExtraArtists(extraArtists.map((v, j) => (j === i ? e.target.value : v)))
-                      }
+                      onFocus={() => { setActiveChip(i); chipSelectedRef.current = null; }}
+                      onChange={(e) => {
+                        chipSelectedRef.current = null;
+                        setActiveChip(i);
+                        setExtraArtists(extraArtists.map((v, j) => (j === i ? e.target.value : v)));
+                      }}
                       placeholder={i === 0 ? "Second artist…" : "Another artist…"}
                       className="bg-transparent outline-none text-xs text-text w-28"
                     />
@@ -354,6 +401,37 @@ export function GenerateControls({
                     >
                       ×
                     </button>
+                    {/* Chip autocomplete dropdown — same style as the primary input's,
+                        but narrower-anchored under this chip and width-capped so it
+                        stays readable without forcing horizontal page scroll. */}
+                    {activeChip === i && chipSearch.items.length > 0 && (
+                      <ul
+                        onScroll={(e) => {
+                          const el = e.currentTarget;
+                          if (el.scrollHeight - el.scrollTop - el.clientHeight < 48) chipSearch.loadMore();
+                        }}
+                        className="absolute z-10 top-full left-0 mt-1 w-64 max-w-[85vw] bg-panel border border-border rounded shadow-xl max-h-48 overflow-auto"
+                      >
+                        {chipSearch.items.map((s) => (
+                          <li
+                            key={s}
+                            onClick={() => {
+                              chipSelectedRef.current = s;
+                              setExtraArtists(extraArtists.map((v, j) => (j === i ? s : v)));
+                              chipSearch.reset();
+                            }}
+                            className="px-2.5 py-1.5 text-xs text-text hover:bg-rowsel cursor-pointer"
+                          >
+                            {s}
+                          </li>
+                        ))}
+                        {(chipSearch.loading || chipSearch.hasMore) && (
+                          <li className="px-2.5 py-1.5 text-2xs text-faint">
+                            {chipSearch.loading ? "Loading…" : "Scroll for more"}
+                          </li>
+                        )}
+                      </ul>
+                    )}
                   </span>
                 ))}
                 {extraArtists.length < 3 && (
