@@ -1480,10 +1480,11 @@ def handle_generate_playlist(cmd_data: Dict[str, Any]) -> None:
             emit_progress("generate", 60, 100, "Generating playlist")
             emit_log("INFO", f"Running playlist generation with cohesion_mode={cohesion_mode}")
 
-            if mode == "artist" and artist:
-                # Single artist mode
+            _artists = list(getattr(request, "artists", []) or [])
+            if mode == "artist" and (artist or _artists):
+                # Single artist mode, or multi-artist blend when 2+ chips are set
                 playlist_data = generator.create_playlist_for_artist(
-                    artist,
+                    artist or _artists[0],
                     track_count,
                     track_title=track_title,
                     track_titles=seed_tracks,
@@ -1494,6 +1495,7 @@ def handle_generate_playlist(cmd_data: Dict[str, Any]) -> None:
                     popular_seeds_mode=request.popular_seeds_mode,
                     popularity_mode=request.popularity_mode,
                     seed_epoch=request.seed_epoch,
+                    artist_names=_artists,
                 )
             elif mode == "seeds" and seed_tracks:
                 # Seeds mode (Phase 2 UI)

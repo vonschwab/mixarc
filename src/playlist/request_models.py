@@ -90,6 +90,8 @@ class GeneratePlaylistRequest:
     mode: GenerateMode = "artist"
     tracks: int = 30
     artist: Optional[str] = None
+    artists: list[str] = field(default_factory=list)
+    """2+ names activate the multi-artist blend; `artist` stays the primary name."""
     genre: Optional[str] = None
     track: Optional[str] = None
     seed_tracks: list[str] = field(default_factory=list)
@@ -117,6 +119,7 @@ class GeneratePlaylistRequest:
             mode=ui_state.mode,
             tracks=ui_state.track_count,
             artist=ui_state.primary_artist() if ui_state.mode == "artist" else None,
+            artists=_clean_list(list(getattr(ui_state, "artist_queries", []) or [])),
             genre=ui_state.genre_query if ui_state.mode == "genre" else None,
             seed_tracks=_clean_list(seed_tracks or []),
             seed_track_ids=_clean_list(seed_track_ids if seed_track_ids is not None else ui_state.seed_track_ids),
@@ -142,6 +145,7 @@ class GeneratePlaylistRequest:
             mode=mode,
             tracks=tracks,
             artist=_clean_text(args.get("artist")),
+            artists=_clean_list(args.get("artists")),
             genre=_clean_text(args.get("genre")),
             track=_clean_text(args.get("track")),
             seed_tracks=_clean_list(args.get("seed_tracks")),
@@ -223,6 +227,9 @@ class GeneratePlaylistRequest:
             args["seed_track_ids"] = seed_track_ids
         if anchor_seed_ids:
             args["anchor_seed_ids"] = anchor_seed_ids
+        artists = _clean_list(self.artists)
+        if artists:
+            args["artists"] = artists
         if self.include_collaborations:
             args["include_collaborations"] = True
         if self.exclude_seed_tracks_from_recency:
@@ -238,7 +245,7 @@ class GeneratePlaylistRequest:
         return args
 
     def validation_error(self) -> Optional[str]:
-        if self.mode == "artist" and not _clean_text(self.artist):
+        if self.mode == "artist" and not (_clean_text(self.artist) or _clean_list(self.artists)):
             return "Enter an artist before generating."
         if self.mode == "genre" and not _clean_text(self.genre):
             return "Enter a genre before generating."
