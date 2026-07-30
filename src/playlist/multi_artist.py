@@ -35,6 +35,39 @@ logger = logging.getLogger(__name__)
 # the measured numbers this was set against.
 ABSOLUTE_MIN_TRANSITION_FLOOR = 0.40
 
+# The floor order_with_alternation's ladder search applies to PIER-TO-PIER
+# adjacency -- a different and naturally much lower quantity than the final
+# playlist's ABSOLUTE_MIN_TRANSITION_FLOOR above, because piers are
+# deliberately spread apart and the beam fills the gaps between them.
+#
+# CALIBRATION (2026-07-30, forced-interleaving ladder fix): measured the
+# EXACT per-level pier-adjacency table (min edge at every alternation level
+# from the theoretical max down to the lowest reachable) for three real
+# pairings via `_enumerate_best_orders_by_level` on the real artifact/DB,
+# `track_count=30`, `random_seed=0`:
+#
+#   Vegyn + Black Moth Super Rainbow (3+3, max_alt=5):
+#     alt=5: 0.5133   alt=4: 0.5133   alt=3: 0.5647   alt=2: 0.5647   alt=1: 0.6028
+#   Brian Eno + Harold Budd (3+2+1 incl. joint, max_alt=5):
+#     alt=5: 0.0120   alt=4: 0.4768   alt=3: 0.4905   alt=2: 0.4905
+#   Brian Eno + David Bowie (3+3, max_alt=5):
+#     alt=5: 0.0413   alt=4: 0.0413   alt=3: 0.1022   alt=2: 0.1022   alt=1: 0.3680
+#
+# Two genuinely broken (near-orthogonal) levels: Eno+Budd's 5/5 (0.0120) and
+# Eno+Bowie's 5/5 and 4/5 (0.0413) -- both must stay rejected. One level that
+# MUST be admitted to avoid a real regression: Eno+Bowie's 3/5 and 2/5
+# (0.1022) -- the pre-forced-interleaving code achieved 2/5 for this pairing,
+# so a floor that rejects 0.1022 regresses it to 1/5 (worse than before the
+# rewrite; this is exactly the bug this calibration fixes). `0.08` sits with
+# ~2x margin above the highest rejected value (0.0413) and ~22% margin below
+# the lowest value that must be admitted (0.1022) -- comfortably separated
+# from both anchors without sitting on either boundary. Verified live: at
+# 0.08 all three pairings' final playlist `min_transition` stayed >= 0.55,
+# far clear of ABSOLUTE_MIN_TRANSITION_FLOOR (0.40) -- see
+# docs/superpowers/sdd/2026-07-29-multi-artist-blend/forced-interleaving-report.md
+# for the full measured table and the three post-calibration generations.
+PIER_ADJACENCY_ALTERNATION_FLOOR = 0.08
+
 
 @dataclass(frozen=True)
 class MultiArtistConfig:
@@ -44,6 +77,7 @@ class MultiArtistConfig:
     max_artists: int = 4
     joint_pier_min_budget: int = 3
     low_overlap_threshold: float = 0.15
+    pier_adjacency_floor: float = PIER_ADJACENCY_ALTERNATION_FLOOR
 
 
 def multi_artist_config_from_ds(ds_cfg: Dict[str, Any]) -> MultiArtistConfig:
@@ -68,6 +102,9 @@ def multi_artist_config_from_ds(ds_cfg: Dict[str, Any]) -> MultiArtistConfig:
         max_artists=int(raw.get("max_artists", 4)),
         joint_pier_min_budget=int(raw.get("joint_pier_min_budget", 3)),
         low_overlap_threshold=float(raw.get("low_overlap_threshold", 0.15)),
+        pier_adjacency_floor=float(
+            raw.get("pier_adjacency_floor", PIER_ADJACENCY_ALTERNATION_FLOOR)
+        ),
     )
 
 
@@ -461,37 +498,55 @@ def _alt_count_from_labels(labels: Sequence[str]) -> int:
     return sum(1 for a, b in zip(labels, labels[1:]) if a != b)
 
 
-def _greedy_label_sequence(
-    counts: Dict[str, int], *, first: Optional[str] = None
+def _label_sequence_at_level(
+    counts: Dict[str, int],
+    *,
+    target_alt: Optional[int] = None,
+    first: Optional[str] = None,
 ) -> List[str]:
-    """One label sequence achieving ``_max_achievable_alternation(counts.values())``.
+    """A label sequence with (at most) ``target_alt`` adjacent-label changes,
+    or the theoretical MAXIMUM achievable when ``target_alt`` is ``None``.
 
-    Classic exchange-argument greedy for "minimize adjacent duplicates": at
-    every step, place the remaining label with the highest count that is NOT
-    the immediately-preceding label (ties broken by label name, for
-    determinism); only place a repeat when every remaining pier shares the
-    previous label (unavoidable -- happens only when a group holds a strict
-    majority, exactly the case the ``2*m - n - 1`` term above accounts for).
-    Provably optimal for this class of "minimize adjacent duplicates"
-    problems -- always attacking the largest remaining bucket first never
-    forces a worse repeat later than necessary.
+    ``target_alt=None`` is the classic exchange-argument greedy for "minimize
+    adjacent duplicates" -- proven optimal, matches
+    ``_max_achievable_alternation``: at every step, place the remaining label
+    with the highest count that is NOT the immediately-preceding one (ties
+    broken by label name for determinism); only repeat when every remaining
+    pier shares the previous label (unavoidable -- a group holding a strict
+    majority, exactly the ``2*m - n - 1`` case).
+
+    A numeric ``target_alt`` generalizes this with a change BUDGET: the same
+    avoid-the-previous-label greedy runs until ``target_alt`` changes have
+    been spent, then switches to holding the current label's run for as long
+    as it has stock (repeating on purpose, rather than avoiding a repeat),
+    so the ladder in ``order_with_alternation`` can ask for progressively
+    LOWER alternation levels (more same-group runs, generally easier to keep
+    a healthy worst edge) without hand-building a separate construction per
+    level. Not exact for arbitrary targets (a majority label running out
+    mid-sequence can force one extra, unavoidable change) -- callers must
+    measure the ACTUAL alternation of the result, never assume it equals
+    ``target_alt``.
 
     ``first`` optionally forces the opening label (falls through to the
-    natural greedy pick if that label is absent or has zero count) -- used to
-    generate a handful of distinct-but-still-optimal label sequences for
-    ``order_with_alternation`` to pick a sonic winner among.
+    natural greedy pick if absent or already exhausted) -- used to generate a
+    handful of distinct label sequences per level for sonic variety.
     """
     remaining = {k: v for k, v in counts.items() if v > 0}
     result: List[str] = []
     prev: Optional[str] = None
+    changes = 0
     forced_first = first if (first is not None and remaining.get(first, 0) > 0) else None
     while remaining:
         if not result and forced_first is not None:
             pick = forced_first
+        elif target_alt is not None and changes >= target_alt and prev in remaining:
+            pick = prev  # budget spent -- hold the current run rather than switch
         else:
             candidates = [lbl for lbl in remaining if lbl != prev]
             pool = candidates or list(remaining)  # forced repeat -- majority group only
             pick = max(pool, key=lambda lbl: (remaining[lbl], lbl))
+        if prev is not None and pick != prev:
+            changes += 1
         result.append(pick)
         remaining[pick] -= 1
         if remaining[pick] == 0:
@@ -510,57 +565,44 @@ _FULL_ENUMERATION_PIER_CAP = 8
 _BEAM_WIDTH = 6
 
 
-def _enumerate_best_orders(
+def _enumerate_best_orders_by_level(
     idx: List[int],
     X_norm: np.ndarray,
     group_of_index: Dict[int, str],
-    max_alt: int,
-) -> Tuple[Optional[List[int]], Optional[float], List[int], float]:
+) -> Dict[int, Tuple[List[int], float, float]]:
     """Exact search over every permutation of ``idx`` (assumed small -- see
-    ``_FULL_ENUMERATION_PIER_CAP``).
+    ``_FULL_ENUMERATION_PIER_CAP``), grouped by achieved alternation count.
 
-    Returns ``(best_at_max, best_at_max_min, best_unconstrained, unconstrained_min)``:
-    the best (highest min edge, tie-broken by highest total sonic cost) order
-    among those achieving exactly ``max_alt`` artist changes, and separately
-    the best order of ANY alternation (the true "best-available" the absolute-
-    floor safety valve falls back to). ``best_at_max`` is ``None`` only if no
-    permutation reaches ``max_alt``, which should not happen since ``max_alt``
-    is derived to be achievable -- callers must handle it defensively anyway.
+    Returns ``{alt_count: (order, min_edge, sonic_cost)}`` -- the best order
+    (highest min edge, tie-broken by highest total sonic cost) at EVERY
+    alternation level some permutation of these piers actually reaches, not
+    just the theoretical maximum. ``order_with_alternation``'s ladder search
+    walks this dict from the highest key down, taking the first level whose
+    worst edge clears the pier-adjacency floor -- the "unconstrained best"
+    (what the pre-ladder safety valve fell back to) is simply the entry with
+    the best ``(min_edge, cost)`` across every key, since every permutation
+    belongs to exactly one level and each level's own best is already
+    tracked here.
     """
     n = len(idx)
     Xn = X_norm[idx]
     sim = Xn @ Xn.T
     labels = [group_of_index.get(m, "") for m in idx]
 
-    best_at_max_local: Optional[Tuple[int, ...]] = None
-    best_at_max_stats: Optional[Tuple[float, float]] = None
-    best_unconstrained_local: Optional[Tuple[int, ...]] = None
-    best_unconstrained_stats: Optional[Tuple[float, float]] = None
-
+    by_level: Dict[int, Tuple[Tuple[int, ...], float, float]] = {}
     for perm in itertools.permutations(range(n)):
         edges = [float(sim[perm[i], perm[i + 1]]) for i in range(n - 1)]
         mn = min(edges)
         cost = sum(edges)
-        stats = (mn, cost)
-        if best_unconstrained_stats is None or stats > best_unconstrained_stats:
-            best_unconstrained_local, best_unconstrained_stats = perm, stats
         alt = sum(1 for i in range(n - 1) if labels[perm[i]] != labels[perm[i + 1]])
-        if alt == max_alt:
-            if best_at_max_stats is None or stats > best_at_max_stats:
-                best_at_max_local, best_at_max_stats = perm, stats
+        existing = by_level.get(alt)
+        if existing is None or (mn, cost) > (existing[1], existing[2]):
+            by_level[alt] = (perm, mn, cost)
 
-    def _to_global(local_perm: Optional[Tuple[int, ...]]) -> Optional[List[int]]:
-        return [idx[k] for k in local_perm] if local_perm is not None else None
-
-    assert best_unconstrained_local is not None and best_unconstrained_stats is not None, (
-        "n >= 2 guarantees at least one permutation exists"
-    )
-    return (
-        _to_global(best_at_max_local),
-        best_at_max_stats[0] if best_at_max_stats else None,
-        _to_global(best_unconstrained_local),
-        best_unconstrained_stats[0],
-    )
+    return {
+        alt: ([idx[k] for k in perm], mn, cost)
+        for alt, (perm, mn, cost) in by_level.items()
+    }
 
 
 def _assign_medoids_to_labels(
@@ -604,45 +646,60 @@ def _assign_medoids_to_labels(
     return [(order, mn, cost) for order, _remaining, mn, cost in beam]
 
 
-def _bounded_best_at_max(
+def _bounded_best_orders_by_level(
     idx: List[int],
     X_norm: np.ndarray,
     group_of_index: Dict[int, str],
     max_alt: int,
     counts: Dict[str, int],
-) -> Tuple[Optional[List[int]], Optional[float]]:
-    """Above the exact-enumeration cap: try a handful of alternation-optimal
-    label sequences (the natural greedy pick, plus one forced-first-label
-    variant per group for sonic variety), beam-searching the medoid
-    assignment within each, and keep the best (min edge, then sonic cost)
-    across all of them.
+) -> Dict[int, Tuple[List[int], float, float]]:
+    """Above the exact-enumeration cap: the per-level table
+    ``_enumerate_best_orders_by_level`` produces exactly, approximated.
+
+    For every level from ``max_alt`` down to 0, try a handful of label
+    sequences targeting that level (``_label_sequence_at_level``, varied by
+    forced opening label for sonic diversity), beam-search each one's medoid
+    assignment (``_assign_medoids_to_labels``), and file every resulting
+    order under its ACTUAL achieved alternation count (never the target it
+    was asked for -- ``_label_sequence_at_level`` is not exact for arbitrary
+    targets). Also folds in the pure multi-start greedy nearest-neighbor walk
+    (ignoring alternation entirely) so the table's global best-across-levels
+    entry still matches what the old unconstrained fallback used to compute.
+
+    Not guaranteed to populate every level an exact search would find (this
+    is the approximate path, only reached above ``_FULL_ENUMERATION_PIER_CAP``
+    piers) -- the ladder in ``order_with_alternation`` tolerates gaps by
+    walking whatever keys are present.
     """
     medoids_by_label: Dict[str, List[int]] = {}
     for i in idx:
         medoids_by_label.setdefault(group_of_index.get(i, ""), []).append(i)
 
-    seqs: List[List[str]] = []
-    seen: set = set()
-    for first in (None, *counts.keys()):
-        seq = _greedy_label_sequence(dict(counts), first=first)
-        if _alt_count_from_labels(seq) != max_alt:
-            continue  # a forced start prevented reaching the true max -- skip it
-        key = tuple(seq)
-        if key in seen:
-            continue
-        seen.add(key)
-        seqs.append(seq)
+    levels: Dict[int, Tuple[List[int], float, float]] = {}
 
-    best: Optional[List[int]] = None
-    best_stats: Optional[Tuple[float, float]] = None
-    for seq in seqs:
-        for order, mn, cost in _assign_medoids_to_labels(
-            seq, medoids_by_label, X_norm, beam_width=_BEAM_WIDTH,
-        ):
-            stats = (mn, cost)
-            if best_stats is None or stats > best_stats:
-                best, best_stats = order, stats
-    return best, (best_stats[0] if best_stats else None)
+    def _consider(order: List[int], mn: float, cost: float) -> None:
+        alt = _alternation_count(order, group_of_index)
+        existing = levels.get(alt)
+        if existing is None or (mn, cost) > (existing[1], existing[2]):
+            levels[alt] = (order, mn, cost)
+
+    seen_seqs: set = set()
+    for target in range(max_alt, -1, -1):
+        for first in (None, *counts.keys()):
+            seq = _label_sequence_at_level(dict(counts), target_alt=target, first=first)
+            key = tuple(seq)
+            if key in seen_seqs:
+                continue
+            seen_seqs.add(key)
+            for order, mn, cost in _assign_medoids_to_labels(
+                seq, medoids_by_label, X_norm, beam_width=_BEAM_WIDTH,
+            ):
+                _consider(order, mn, cost)
+
+    unconstrained, unconstrained_min = _best_unconstrained_order_bounded(idx, X_norm)
+    _consider(unconstrained, unconstrained_min, _path_sonic_cost(unconstrained, X_norm))
+
+    return levels
 
 
 def _best_unconstrained_order_bounded(
@@ -670,91 +727,131 @@ def order_with_alternation(
     X_norm: np.ndarray,
     group_of_index: Dict[int, str],
     *,
-    absolute_min_transition_floor: float = ABSOLUTE_MIN_TRANSITION_FLOOR,
-) -> tuple[List[int], bool]:
-    """Order piers to FORCE the maximum artist alternation the group sizes
-    allow (see ``_max_achievable_alternation``) -- alternation is a hard
-    constraint now, not a scored preference (2026-07-30 forced-interleaving
-    rewrite; the earlier ``alternation_bonus``-weighted search over
-    ``order_clusters``' own candidate set could not produce an interleaved
-    order at all, because a greedy nearest-neighbour walk clumps same-artist
-    piers by construction -- see
+    pier_adjacency_floor: float = PIER_ADJACENCY_ALTERNATION_FLOOR,
+) -> Tuple[List[int], bool, int, int]:
+    """Order piers to FORCE the highest artist alternation level that keeps a
+    healthy pier-to-pier worst edge -- alternation is a hard constraint now,
+    not a scored preference (2026-07-30 forced-interleaving rewrite; the
+    earlier ``alternation_bonus``-weighted search over ``order_clusters``'
+    own candidate set could not produce an interleaved order at all, because
+    a greedy nearest-neighbour walk clumps same-artist piers by construction
+    -- see
     docs/superpowers/sdd/2026-07-29-multi-artist-blend/forced-interleaving-report.md).
 
-    Among every order that achieves the theoretical maximum alternation
-    count, picks the one with the highest minimum consecutive-cosine edge
-    (minimax -- design principle 5, "the worst edge defines the experience"),
-    tie-broken by the highest total sonic path cost. Exact via full
-    permutation search through ``_FULL_ENUMERATION_PIER_CAP`` piers; a
-    bounded beam search above that.
+    LADDER SEARCH (2026-07-30, second pass -- the first cut's safety valve
+    was an all-or-nothing cliff: it fell straight from the theoretical
+    maximum to the fully-unconstrained order the instant the maximum
+    breached the floor, which made a real pairing (Eno+Bowie) LESS
+    interleaved than the pre-rewrite code, the opposite of the point of this
+    feature). For each alternation level from the theoretical maximum
+    (``_max_achievable_alternation``) down to 0, computes the best order at
+    that EXACT level (highest minimum consecutive-cosine edge -- minimax,
+    design principle 5 -- tie-broken by highest total sonic path cost; exact
+    via full permutation search through ``_FULL_ENUMERATION_PIER_CAP`` piers,
+    a bounded beam search above that), and takes the HIGHEST level whose
+    worst edge clears ``pier_adjacency_floor``. Only when NO level clears it
+    does this fall back to the single best order across every level
+    regardless of alternation (the same "unconstrained best" the pre-ladder
+    code always used) -- which by construction can never be less alternating
+    than that same unconstrained order, since the ladder already tried and
+    rejected every level above it.
 
-    SAFETY VALVE: if the best maximally-alternating order's worst edge falls
-    below ``absolute_min_transition_floor``, forcing alternation would ship a
-    genuinely broken transition -- alternation yields. Falls back to the
-    best-available order regardless of alternation (still only if that is
-    actually better; forcing never makes things worse) and logs a WARNING
-    naming both the rejected and the fallback worst-edge values. This is the
-    ONE case alternation does not win.
+    ``pier_adjacency_floor`` measures PIER-TO-PIER adjacency, a different and
+    naturally much lower quantity than the final playlist's ``min_transition``
+    (``ABSOLUTE_MIN_TRANSITION_FLOOR``) -- piers are deliberately spread apart
+    and the beam fills the gaps between them, so this floor is its own
+    constant, calibrated separately (see ``PIER_ADJACENCY_ALTERNATION_FLOOR``
+    below for the measured table this was set from). Reusing the final-
+    playlist floor here was the first cut's second bug: it rejected pier
+    orders that went on to produce a perfectly healthy final playlist.
 
-    Returns ``(ordered, improved)``; ``improved`` is True when the returned
-    order differs from the plain ``order_clusters`` default walk.
+    Returns ``(ordered, improved, achieved_alt, max_alt)``: ``improved`` is
+    True when the returned order differs from the plain ``order_clusters``
+    default walk; ``achieved_alt`` / ``max_alt`` let the caller report a
+    relaxation notice when forcing had to step down from the theoretical
+    maximum.
     """
     from src.playlist.artist_style import order_clusters
 
     idx = [int(m) for m in medoids]
     if len(idx) < 2:
-        return list(idx), False
+        return list(idx), False, 0, 0
 
     counts = Counter(group_of_index.get(i, "") for i in idx)
     max_alt = _max_achievable_alternation(list(counts.values()))
     default = order_clusters(idx, X_norm)
 
     if len(idx) <= _FULL_ENUMERATION_PIER_CAP:
-        best_at_max, best_at_max_min, best_unconstrained, unconstrained_min = (
-            _enumerate_best_orders(idx, X_norm, group_of_index, max_alt)
-        )
+        by_level = _enumerate_best_orders_by_level(idx, X_norm, group_of_index)
     else:
-        best_at_max, best_at_max_min = _bounded_best_at_max(
+        by_level = _bounded_best_orders_by_level(
             idx, X_norm, group_of_index, max_alt, dict(counts),
         )
-        best_unconstrained, unconstrained_min = _best_unconstrained_order_bounded(
-            idx, X_norm,
-        )
 
-    if best_at_max is None or best_at_max_min is None:
-        # max_alt is derived to be achievable by construction -- this should
-        # never trigger. Guard defensively rather than crash pier selection
-        # over an ordering nicety.
+    if not by_level:
+        # max_alt is derived to be achievable by construction and the exact/
+        # bounded search always considers at least the plain unconstrained
+        # walk -- this should never trigger. Guard defensively rather than
+        # crash pier selection over an ordering nicety.
         logger.warning(
-            "Multi-artist ordering: no candidate reached the computed max "
-            "alternation (%d of %d pier(s)) -- falling back to the "
-            "unconstrained walk; this should not happen, please report.",
-            max_alt, len(idx),
+            "Multi-artist ordering: the level search produced no candidates "
+            "at all (%d pier(s)) -- falling back to the unconstrained walk; "
+            "this should not happen, please report.", len(idx),
         )
-        best_at_max, best_at_max_min = default, _min_edge(default, X_norm)
+        by_level = {_alternation_count(default, group_of_index): (
+            default, _min_edge(default, X_norm), _path_sonic_cost(default, X_norm),
+        )}
 
-    chosen, chosen_min = best_at_max, best_at_max_min
-    floor = float(absolute_min_transition_floor)
-    if chosen_min < floor:
-        if best_unconstrained is not None and unconstrained_min > chosen_min:
-            chosen, chosen_min = best_unconstrained, unconstrained_min
+    # The single best (min edge, then cost) order across every level -- what
+    # the old pre-ladder safety valve always fell back to, and this ladder's
+    # own last resort when nothing clears the floor.
+    unconstrained_level = max(by_level, key=lambda lvl: (by_level[lvl][1], by_level[lvl][2]))
+    unconstrained, unconstrained_min, _unconstrained_cost = by_level[unconstrained_level]
+
+    floor = float(pier_adjacency_floor)
+    chosen = None
+    chosen_min = None
+    chosen_level = None
+    top_level_min = None  # the theoretical-max level's own worst edge, for the log line
+    for level in sorted(by_level.keys(), reverse=True):
+        order, mn, _cost = by_level[level]
+        if top_level_min is None:
+            top_level_min = mn
+        if mn >= floor:
+            chosen, chosen_min, chosen_level = order, mn, level
+            break
+
+    if chosen is None:
+        # No level -- not even the fully-clumped one -- clears the floor.
+        # Fall back to the single best order regardless of alternation. This
+        # is never LESS alternating than "the unconstrained search would
+        # have produced anyway": it IS that same order.
+        chosen, chosen_min, chosen_level = unconstrained, unconstrained_min, unconstrained_level
         logger.warning(
-            "Multi-artist ordering: forcing the maximum alternation (%d/%d "
-            "changes) would leave a worst edge of %.4f, below the absolute "
-            "floor %.2f -- alternation yields; falling back to the best-"
-            "available order (worst edge %.4f, %d/%d alternation).",
-            max_alt, max(len(idx) - 1, 0), best_at_max_min, floor,
-            chosen_min, _alternation_count(chosen, group_of_index), max_alt,
+            "Multi-artist ordering: no alternation level (max %d down to 0) "
+            "cleared the pier-adjacency floor %.2f (best level's worst edge "
+            "was %.4f) -- falling back to the single best-available order "
+            "regardless of alternation (worst edge %.4f, %d/%d alternation).",
+            max_alt, floor, top_level_min if top_level_min is not None else float("nan"),
+            chosen_min, chosen_level, max_alt,
+        )
+    elif chosen_level < max_alt:
+        logger.warning(
+            "Multi-artist ordering: the alternation ladder stepped down from "
+            "the theoretical max (%d, worst edge %.4f) to %d (worst edge "
+            "%.4f) -- %d/%d was the highest level clearing the pier-adjacency "
+            "floor %.2f.",
+            max_alt, top_level_min if top_level_min is not None else float("nan"),
+            chosen_level, chosen_min, chosen_level, max_alt, floor,
         )
 
-    achieved_alt = _alternation_count(chosen, group_of_index)
     logger.info(
         "Multi-artist ordering: alternation %d/%d (theoretical max), chosen "
         "worst edge %.4f, unconstrained-best worst edge %.4f",
-        achieved_alt, max_alt, chosen_min, unconstrained_min,
+        chosen_level, max_alt, chosen_min, unconstrained_min,
     )
     improved = chosen != default
-    return chosen, improved
+    return chosen, improved, chosen_level, max_alt
 
 
 @dataclass
@@ -1175,9 +1272,29 @@ def select_multi_artist_piers(
         "must have succeeded and set X_norm_shared -- a future refactor of the "
         "loop above must preserve this."
     )
-    ordered, _improved = order_with_alternation(
+    ordered, _improved, _achieved_alt, _max_alt = order_with_alternation(
         all_medoids, X_norm_shared, group_of_index,
+        pier_adjacency_floor=ma_cfg.pier_adjacency_floor,
     )
+    if _achieved_alt < _max_alt:
+        # The alternation ladder had to step down from the theoretical
+        # maximum to keep a healthy pier-to-pier transition (see
+        # order_with_alternation's own WARNING for the rejected/chosen
+        # worst-edge values) -- report it to the user the same way the
+        # low-overlap notice below does, rather than silently shipping a
+        # less-interleaved blend with nothing to show for it.
+        bridge_label = " & ".join(present_names)
+        relaxations.append({
+            "type": "relaxation",
+            "scope": "multi_artist",
+            "bridge": bridge_label,
+            "relaxed": [
+                f"full artist alternation ({_achieved_alt} of {_max_alt} "
+                "possible pier-to-pier changes — forcing more would have "
+                "broken a pier transition)"
+            ],
+            "severity": "info",
+        })
 
     mean_affinity = (
         float(np.mean([affinity_by_index.get(i, 0.0) for i in ordered]))

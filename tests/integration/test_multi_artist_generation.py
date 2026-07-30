@@ -462,13 +462,26 @@ def test_worst_edge_stays_above_an_absolute_floor():
     and well above the point where the pipeline's own repair logic would
     already consider the edge broken.
 
-    2026-07-30 (forced-interleaving rewrite): this same value is now also the
-    live absolute-floor safety valve INSIDE order_with_alternation itself
-    (src.playlist.multi_artist.ABSOLUTE_MIN_TRANSITION_FLOOR, imported above
-    rather than redefined here) -- forcing pier alternation falls back to the
-    best-available order whenever it would otherwise breach this floor, so
-    this test and that safety valve are now pinned to the same number by
-    construction, not just by convention.
+    2026-07-30 (forced-interleaving rewrite, pass 1): this same value became
+    ``src.playlist.multi_artist.ABSOLUTE_MIN_TRANSITION_FLOOR``, imported
+    above rather than redefined here, so this test and that constant can
+    never drift apart.
+
+    2026-07-30 (forced-interleaving rewrite, pass 2 -- coordinator follow-up,
+    same day): ``ABSOLUTE_MIN_TRANSITION_FLOOR`` is NO LONGER read inside
+    ``order_with_alternation``. Pass 1 reused it as the ordering safety
+    valve's own threshold, but that floor measures the FINAL PLAYLIST's
+    ``min_transition`` (what this test asserts) -- a different and naturally
+    much higher quantity than PIER-TO-PIER adjacency (piers are deliberately
+    spread apart; the beam fills the gaps between them), so reusing it there
+    rejected pier orders that went on to produce a perfectly healthy final
+    playlist (measured: Eno+Bowie's best-available pier-adjacency order was
+    0.3680, already below 0.40, yet still delivered a final `min_transition`
+    of 0.5490). The ordering safety valve now has its own constant,
+    ``PIER_ADJACENCY_ALTERNATION_FLOOR`` (calibrated separately on the pier-
+    adjacency scale -- see that constant's own docstring for the measured
+    table). This test's floor and that one are deliberately DIFFERENT
+    numbers measuring DIFFERENT quantities now; do not reunify them.
     """
     for names in ([ENO, BUDD], [ENO, BOWIE], [BUDD, FOXX]):
         blend = _blend(names)
@@ -700,9 +713,9 @@ def test_blend_failed_relaxations_survive_a_failing_fallback():
 def test_terminal_avoidance_applies_to_blend_piers():
     """Review Finding 8: support_by_index / _terminal_avoidance_support were
     computed only inside the single-artist tail, so a blend could seat a
-    sonic-outlier pier in the closing seat -- order_with_alternation (sonic
-    path cost + alternation only) has no notion of within-artist support.
-    Forces a MultiArtistPiers whose LAST pier looks catastrophically
+    sonic-outlier pier in the closing seat -- order_with_alternation (forced
+    alternation ladder + minimax sonic edge) has no notion of within-artist
+    support. Forces a MultiArtistPiers whose LAST pier looks catastrophically
     low-support and everything else high-support, so
     reorder_avoiding_low_support_terminal has an unambiguous reason to move
     it off the terminal seat, and asserts the dispatched pier order changed.

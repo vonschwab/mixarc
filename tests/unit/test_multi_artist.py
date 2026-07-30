@@ -7,7 +7,6 @@ tests/integration/test_multi_artist_generation.py.
 from __future__ import annotations
 
 import logging
-from collections import Counter
 from dataclasses import dataclass as _dc
 
 import numpy as np
@@ -15,13 +14,13 @@ import pytest
 
 from src.playlist.artist_style import ArtistStyleConfig, _select_k
 from src.playlist.multi_artist import (
-    ABSOLUTE_MIN_TRANSITION_FLOOR,
+    PIER_ADJACENCY_ALTERNATION_FLOOR,
     ArtistGroup,
     MultiArtistBlendFailed,
     MultiArtistConfig,
     MultiArtistPiers,
     _blocked_artist_keys,
-    _enumerate_best_orders,
+    _enumerate_best_orders_by_level,
     _max_achievable_alternation,
     allocate_pier_budget,
     group_genre_profiles,
@@ -52,6 +51,7 @@ def test_config_defaults_are_live():
     assert cfg.max_artists == 4
     assert cfg.joint_pier_min_budget == 3
     assert cfg.low_overlap_threshold == pytest.approx(0.15)
+    assert cfg.pier_adjacency_floor == pytest.approx(PIER_ADJACENCY_ALTERNATION_FLOOR)
     assert not hasattr(cfg, "alternation_bonus")
 
 
@@ -64,6 +64,13 @@ def test_config_reads_overrides():
     assert cfg.max_artists == 2
     # untouched keys keep their defaults
     assert cfg.genre_share == pytest.approx(0.25)
+
+
+def test_config_reads_pier_adjacency_floor_override():
+    cfg = multi_artist_config_from_ds(
+        {"multi_artist": {"pier_adjacency_floor": 0.15}}
+    )
+    assert cfg.pier_adjacency_floor == pytest.approx(0.15)
 
 
 @_dc
@@ -447,19 +454,33 @@ def test_joint_group_guaranteed_seat_survives_when_no_surplus_is_needed():
 
 # ---------------------------------------------------------------------------
 # Forced-interleaving rewrite (2026-07-30, docs/superpowers/sdd/
-# 2026-07-29-multi-artist-blend/forced-interleaving-report.md). Alternation
-# used to be a scored PREFERENCE (`sonic path cost + alternation_bonus *
-# artist changes`) applied over order_clusters' own candidate set -- but
-# every candidate in that set was a greedy nearest-neighbor walk, which
-# structurally clumps same-artist piers, so no bonus weight could ever
-# produce a genuinely interleaved order (real repro: Vegyn + Black Moth Super
-# Rainbow, 6 piers, shipped 1/5 alternation with the old code). Alternation is
-# now a HARD CONSTRAINT: order_with_alternation computes the true maximum
-# achievable alternation for the actual group sizes and forces it, picking
-# the minimax-best order among those that reach it, with an absolute-floor
-# safety valve for the case forcing it would break a transition.
+# 2026-07-29-multi-artist-blend/forced-interleaving-report.md), TWO passes.
 #
-# Tests removed as part of this rewrite (documented, not silently dropped):
+# Pass 1: alternation used to be a scored PREFERENCE (`sonic path cost +
+# alternation_bonus * artist changes`) applied over order_clusters' own
+# candidate set -- but every candidate in that set was a greedy nearest-
+# neighbor walk, which structurally clumps same-artist piers, so no bonus
+# weight could ever produce a genuinely interleaved order (real repro: Vegyn
+# + Black Moth Super Rainbow, 6 piers, shipped 1/5 alternation). Fixed by
+# forcing the theoretical maximum alternation, with an all-or-nothing safety
+# valve that fell straight to the fully-unconstrained order when the maximum
+# breached a floor.
+#
+# Pass 2 (coordinator follow-up, same date): that safety valve was a CLIFF,
+# not a ladder -- it caused a real regression (Eno+Bowie went from a
+# pre-rewrite 2/5 down to 1/5, the opposite of the point of this feature),
+# and it reused the final-playlist floor (ABSOLUTE_MIN_TRANSITION_FLOOR,
+# 0.40) against PIER-TO-PIER adjacency, a different and naturally much lower
+# quantity. Fixed with (a) a LADDER: try the theoretical max, then max-1,
+# max-2, ... taking the HIGHEST level that clears the floor, falling back to
+# the fully-unconstrained order only when no level clears it; and (b) a
+# separate ``pier_adjacency_floor`` (``PIER_ADJACENCY_ALTERNATION_FLOOR``),
+# calibrated on the pier-adjacency scale, not reusing the final-playlist one.
+# ``order_with_alternation`` now returns a 4-tuple
+# ``(ordered, improved, achieved_alt, max_alt)`` so the caller can report a
+# relaxation notice when the ladder had to step down.
+#
+# Tests removed as part of Pass 1 (documented, not silently dropped):
 #   - test_alternation_bonus_zero_reproduces_order_clusters: tested the
 #     alternation_bonus=0.0 "disable" escape hatch, which no longer exists --
 #     alternation is unconditional now (governed by group-size geometry, not
@@ -478,16 +499,13 @@ def test_max_achievable_alternation_matches_the_closed_form():
     assert _max_achievable_alternation([]) == 0
 
 
-def test_forced_alternation_reaches_the_theoretical_maximum_when_the_floor_allows():
-    """Four piers on a symmetric square: A0 A1 B0 B1 (0/90/180/270 degrees).
-    Every fully-alternating order on this geometry has worst edge -1.0 (the
-    two cross-group pairs are either 90 degrees apart, cos=0, or directly
-    opposite, cos=-1, and a length-4 alternating path can never avoid at
-    least one opposite pair) -- well below the real ABSOLUTE_MIN_TRANSITION_
-    FLOOR (0.40), so this test bypasses the floor (absolute_min_transition_
-    floor=-2.0) to isolate the forcing behavior itself; the floor's own
-    fallback is covered separately below.
-    """
+# Shared geometry for the ladder/floor tests below: four piers on a symmetric
+# square, A0 A1 B0 B1 at 0/90/180/270 degrees. Exact per-level pier-adjacency
+# table (measured via _enumerate_best_orders_by_level): alt=3 (full
+# alternation) -> worst edge -1.0 (every fully-alternating order includes at
+# least one directly-opposite pair); alt=2 -> 0.0; alt=1 (the clump) -> 0.0.
+# alt=0 is unreachable (2 distinct groups always need >= 1 change).
+def _square_geometry():
     X = np.zeros((4, 2))
     X[0] = [1.0, 0.0]     # A0
     X[1] = [0.0, 1.0]     # A1
@@ -495,12 +513,21 @@ def test_forced_alternation_reaches_the_theoretical_maximum_when_the_floor_allow
     X[3] = [0.0, -1.0]    # B1
     X = X / np.linalg.norm(X, axis=1, keepdims=True)
     group_of = {0: "A", 1: "A", 2: "B", 3: "B"}
-    ordered, improved = order_with_alternation(
-        [0, 1, 2, 3], X, group_of, absolute_min_transition_floor=-2.0,
+    return X, group_of
+
+
+def test_forced_alternation_reaches_the_theoretical_maximum_when_the_floor_allows():
+    """The square's full-alternation level (-1.0) is far below any real
+    floor, so this test bypasses it (pier_adjacency_floor=-2.0) to isolate
+    the forcing behavior itself; the floor's own ladder/fallback behavior is
+    covered separately below.
+    """
+    X, group_of = _square_geometry()
+    ordered, improved, achieved_alt, max_alt = order_with_alternation(
+        [0, 1, 2, 3], X, group_of, pier_adjacency_floor=-2.0,
     )
-    labels = [group_of[i] for i in ordered]
-    changes = sum(1 for a, b in zip(labels, labels[1:]) if a != b)
-    assert changes == 3, f"expected full (3/3) alternation, got {changes}: {labels}"
+    assert max_alt == 3
+    assert achieved_alt == 3, f"expected full (3/3) alternation, got {achieved_alt}"
     assert set(ordered) == {0, 1, 2, 3}, "ordering must be a permutation"
     assert improved is True, (
         "the plain order_clusters default walk clumps (A0 A1 B0 B1, 1/3 "
@@ -508,55 +535,65 @@ def test_forced_alternation_reaches_the_theoretical_maximum_when_the_floor_allow
     )
 
 
-def test_absolute_floor_overrides_forced_alternation_and_warns(caplog):
-    """Same geometry as above, but with the REAL default floor (0.40): every
-    fully-alternating order's worst edge (-1.0) is genuinely broken, so the
-    safety valve must yield -- falling back to the best-available order (the
-    A0 A1 B0 B1 clump, worst edge 0.0) instead of shipping the forced
-    alternation, and logging a WARNING naming both numbers.
+def test_ladder_steps_down_one_level_at_a_time_not_straight_to_the_floor():
+    """THE PASS-2 REGRESSION THIS FIXES: a floor between the square's alt=3
+    (-1.0, broken) and alt=2/alt=1 (both 0.0) must land on alt=2 -- the
+    HIGHEST level clearing it -- never skip straight past it to the fully-
+    unconstrained alt=1 clump just because alt=1 ALSO clears the same floor.
+    Before the ladder fix, the safety valve only ever knew "the max" and
+    "the unconstrained best"; it had no notion of an intermediate level.
     """
-    X = np.zeros((4, 2))
-    X[0] = [1.0, 0.0]
-    X[1] = [0.0, 1.0]
-    X[2] = [-1.0, 0.0]
-    X[3] = [0.0, -1.0]
-    X = X / np.linalg.norm(X, axis=1, keepdims=True)
-    group_of = {0: "A", 1: "A", 2: "B", 3: "B"}
+    X, group_of = _square_geometry()
+    ordered, improved, achieved_alt, max_alt = order_with_alternation(
+        [0, 1, 2, 3], X, group_of, pier_adjacency_floor=-0.5,
+    )
+    assert max_alt == 3
+    assert achieved_alt == 2, (
+        f"expected the ladder to land on the intermediate level 2 (which "
+        f"clears -0.5), not skip to 1 or fail up at 3, got {achieved_alt}"
+    )
+    chosen_min = min(float(np.dot(X[a], X[b])) for a, b in zip(ordered, ordered[1:]))
+    assert chosen_min == pytest.approx(0.0)
+    assert improved is True
+
+
+def test_pier_adjacency_floor_falls_back_when_no_level_clears_it_and_warns(caplog):
+    """With the real default pier_adjacency_floor (0.08), every level on the
+    square (-1.0, 0.0, 0.0) falls short -- the ladder must exhaust every
+    level, fall back to the single best-available order (alt=1, the clump,
+    worst edge 0.0), and log a WARNING naming the floor and the rejected
+    top-level worst edge.
+    """
+    X, group_of = _square_geometry()
     with caplog.at_level(logging.WARNING):
-        ordered, _improved = order_with_alternation([0, 1, 2, 3], X, group_of)
-    labels = [group_of[i] for i in ordered]
-    changes = sum(1 for a, b in zip(labels, labels[1:]) if a != b)
-    chosen_min = min(
-        float(np.dot(X[a], X[b])) for a, b in zip(ordered, ordered[1:])
+        ordered, improved, achieved_alt, max_alt = order_with_alternation(
+            [0, 1, 2, 3], X, group_of,
+        )
+    assert max_alt == 3
+    assert achieved_alt < max_alt, (
+        f"no level on this geometry clears the default floor -- must NOT "
+        f"ship the forced maximum, got {achieved_alt}/{max_alt}"
     )
-    assert changes < 3, (
-        f"forcing full alternation here breaks the floor -- must NOT be "
-        f"shipped, got {changes}/3: {labels}"
-    )
+    chosen_min = min(float(np.dot(X[a], X[b])) for a, b in zip(ordered, ordered[1:]))
     assert chosen_min == pytest.approx(0.0), (
         f"expected the floor fallback to land on the best-available (0.0) "
         f"worst edge, got {chosen_min:.4f}"
     )
     warnings = [r.message for r in caplog.records if r.levelno == logging.WARNING]
     assert any(
-        "alternation yields" in m and "-1.0000" in m and "0.40" in m
+        "no alternation level" in m and "-1.0000" in m and "0.08" in m
         for m in warnings
-    ), f"expected a WARNING naming both the rejected and floor values: {warnings}"
+    ), f"expected a WARNING naming both the rejected top level and the floor: {warnings}"
 
 
-def test_floor_safety_valve_rescues_to_the_best_available_order():
-    """Seeded random-search regression, rewritten for the new contract: the
-    OLD invariant ('winner never worse than the plain default walk') no
-    longer holds -- forcing alternation is EXPECTED to sometimes land a worse
-    worst edge than order_clusters' own greedy default now (that is the
-    entire point of this task; e.g. Eno+Budd goes from a 0.6135 clump to a
-    forced-alternation ~0.51-0.61 depending on geometry). What must still
-    hold: order_with_alternation never leaves a RESCUABLE order below
-    ABSOLUTE_MIN_TRANSITION_FLOOR -- whenever some order clears the floor, the
-    chosen one does too; when nothing can, the chosen one is still the best
-    available. ``_enumerate_best_orders`` (the same function order_with_
-    alternation itself uses for pier counts in this range) is the oracle for
-    "the best achievable, ignoring alternation" on each trial.
+def test_floor_never_leaves_a_rescuable_level_unreached():
+    """Seeded random-search regression: whenever SOME alternation level
+    clears ``PIER_ADJACENCY_ALTERNATION_FLOOR``, the ladder must land on one
+    that does (never leave a rescuable order behind); when nothing clears it,
+    the chosen order must still be the single best available regardless of
+    alternation. ``_enumerate_best_orders_by_level`` (the same function
+    order_with_alternation itself uses for pier counts in this range) is the
+    oracle for "the best achievable at every level" on each trial.
     """
     rng = np.random.default_rng(12345)
     trials = 300
@@ -569,20 +606,17 @@ def test_floor_safety_valve_rescues_to_the_best_available_order():
         labels = rng.choice(["A", "B"], size=n)
         group_of = {i: str(labels[i]) for i in idx}
 
-        counts = list(Counter(group_of[i] for i in idx).values())
-        max_alt = _max_achievable_alternation(counts)
-        _best_at_max, _best_at_max_min, _best_unconstrained, unconstrained_min = (
-            _enumerate_best_orders(idx, X, group_of, max_alt)
-        )
+        by_level = _enumerate_best_orders_by_level(idx, X, group_of)
+        unconstrained_min = max(mn for _order, mn, _cost in by_level.values())
 
-        ordered, _ = order_with_alternation(idx, X, group_of)
+        ordered, _improved, _achieved, _max_alt = order_with_alternation(idx, X, group_of)
         chosen_min = min(
             float(np.dot(X[a], X[b])) for a, b in zip(ordered, ordered[1:])
         )
-        target = min(ABSOLUTE_MIN_TRANSITION_FLOOR, unconstrained_min)
+        target = min(PIER_ADJACENCY_ALTERNATION_FLOOR, unconstrained_min)
         assert chosen_min >= target - 1e-9, (
             f"chosen worst edge {chosen_min:.4f} fell short of the achievable "
-            f"target {target:.4f} (floor={ABSOLUTE_MIN_TRANSITION_FLOOR}, "
+            f"target {target:.4f} (floor={PIER_ADJACENCY_ALTERNATION_FLOOR}, "
             f"unconstrained best={unconstrained_min:.4f})"
         )
 
@@ -602,13 +636,12 @@ def test_bounded_beam_path_still_forces_full_alternation_above_the_cap():
     label_list = ["A"] * 4 + ["B"] * 3 + ["C"] * 3
     group_of = {i: label_list[i] for i in idx}
 
-    ordered, _ = order_with_alternation(
-        idx, X, group_of, absolute_min_transition_floor=-2.0,
+    ordered, _improved, achieved_alt, max_alt = order_with_alternation(
+        idx, X, group_of, pier_adjacency_floor=-2.0,
     )
     assert set(ordered) == set(idx), "must remain a permutation"
-    labels = [group_of[i] for i in ordered]
-    changes = sum(1 for a, b in zip(labels, labels[1:]) if a != b)
-    assert changes == 9, f"expected full alternation (9/9), got {changes}: {labels}"
+    assert max_alt == 9
+    assert achieved_alt == 9, f"expected full alternation (9/9), got {achieved_alt}"
 
 
 def test_logs_alternation_summary_at_info(caplog):
@@ -629,9 +662,9 @@ def test_logs_alternation_summary_at_info(caplog):
 def test_ordering_is_a_permutation_and_handles_degenerate_input():
     X = np.eye(3)
     group_of = {0: "A", 1: "B", 2: "A"}
-    assert order_with_alternation([], X, group_of) == ([], False)
-    single, improved = order_with_alternation([1], X, group_of)
-    assert single == [1] and improved is False
+    assert order_with_alternation([], X, group_of) == ([], False, 0, 0)
+    single, improved, achieved_alt, max_alt = order_with_alternation([1], X, group_of)
+    assert single == [1] and improved is False and achieved_alt == 0 and max_alt == 0
 
 
 def _blend_bundle():
