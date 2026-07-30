@@ -4,7 +4,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from src.playlist import reporter
 from src.playlist.pipeline import generate_playlist_ds as core_generate_playlist_ds
@@ -109,6 +109,7 @@ def generate_playlist_ds(
     internal_connector_max_per_segment: int = 0,
     internal_connector_priority: bool = True,
     tag_anchor_track_ids: Optional[set[str]] = None,
+    seed_artist_keys_override: Optional[Sequence[str]] = None,
 ) -> DsRunResult:
     """Production-facing wrapper around the DS pipeline.
 
@@ -140,6 +141,7 @@ def generate_playlist_ds(
             internal_connector_max_per_segment=internal_connector_max_per_segment,
             internal_connector_priority=internal_connector_priority,
             tag_anchor_track_ids=tag_anchor_track_ids,
+            seed_artist_keys_override=seed_artist_keys_override,
         )
 
     logger.info(
@@ -178,6 +180,7 @@ def generate_playlist_ds(
         internal_connector_max_per_segment=internal_connector_max_per_segment,
         internal_connector_priority=internal_connector_priority,
         tag_anchor_track_ids=tag_anchor_track_ids,
+        seed_artist_keys_override=seed_artist_keys_override,
     )
 
     playlist_stats = result.stats.get("playlist", {})

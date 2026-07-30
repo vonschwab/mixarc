@@ -5,7 +5,7 @@ import math
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 
@@ -369,6 +369,11 @@ def generate_playlist_ds(
     # anchors the artist block injected into the pier list, so the builder can
     # place them in gaps instead of re-ordering them as co-equal piers.
     tag_anchor_track_ids: Optional[set[str]] = None,
+    # Multi-artist blend (Task 9/10): explicit override for the interior-block
+    # artist set, threaded straight through to build_pier_bridge_playlist's
+    # seed_artist_keys_override kwarg. None (default) preserves the
+    # single-artist derivation byte-for-byte.
+    seed_artist_keys_override: Optional[Sequence[str]] = None,
     # Optional pier-bridge infeasible handling + audit context (CLI/GUI)
     dry_run: bool = False,
     pool_source: Optional[str] = None,
@@ -1203,6 +1208,7 @@ def generate_playlist_ds(
                     # pooling=="corridor" branch).
                     popularity_ranks=_banger_ranks,
                     popularity_rank_cutoff=_banger_cutoff,
+                    seed_artist_keys_override=seed_artist_keys_override,
                 )
 
             one_each_candidate_relaxation: Optional[Dict[str, Any]] = None
