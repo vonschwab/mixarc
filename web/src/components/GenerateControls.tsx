@@ -113,6 +113,12 @@ export function GenerateControls({
   const [artistSpacing, setArtistSpacing] = useLocalStorage("pg_artist_spacing", "normal");
   const [diversityLevel, setDiversityLevel] = useLocalStorage("pg_diversity_level", 2);
 
+  // Multi-artist blend: `seed` is artist #1; these are chips for artist #2..N.
+  // Kept separate from the tag-chip reset effect below (which is keyed on
+  // [seed, mode] and fires on every keystroke) — resetting extras on every
+  // seed edit would erase what the user just typed into a chip.
+  const [extraArtists, setExtraArtists] = useLocalStorage<string[]>("pg_extra_artists", []);
+
   // Artist-mode Row 1 extras
   const [artistPresence, setArtistPresence] = useLocalStorage("pg_artist_presence", "medium");
   const [artistVariety, setArtistVariety] = useLocalStorage("pg_artist_variety", "balanced");
@@ -134,6 +140,24 @@ export function GenerateControls({
   const dropdownRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
 
+  // Extra-artist chip autocomplete — ONE shared hook instance across all chips
+  // (React hooks can't be called in a loop). Driven by whichever chip is
+  // currently focused (`activeChip`); `chipSelectedByIndex` mirrors `selectedRef`
+  // above so picking a suggestion doesn't immediately reopen the dropdown.
+  // Deliberately a separate instance from `artistSearch` — that one's query is
+  // bound to `seed` by an effect below, and sharing would make the two fight
+  // over one query state.
+  //
+  // The "last picked" guard is keyed PER CHIP INDEX (not a single scalar like
+  // `selectedRef`): refocusing an already-filled chip must not reopen its
+  // dropdown, but focusing a *different* chip must not clear the first chip's
+  // guard either — a shared scalar conflates the two chips. Re-keyed on chip
+  // removal (see removeChip) so indices stay aligned as later chips shift down.
+  const chipSearch = useInfiniteSearch<string>({ fetchPage: api.autocomplete, pageSize: 30 });
+  const [activeChip, setActiveChip] = useState<number | null>(null);
+  const chipSelectedByIndex = useRef<Record<number, string | null>>({});
+  const chipDropdownRefs = useRef<Record<number, HTMLElement | null>>({});
+
   // Tag steering (artist mode): the artist's published genres as selectable chips.
   const [artistTags, setArtistTags] = useState<
     { name: string; release_count: number; confidence: number }[]
@@ -151,6 +175,18 @@ export function GenerateControls({
     setArtistTags([]);
     setTagsFetched(false);
   }, [seed, mode]);
+
+  // Reset extra-artist chips when leaving artist mode entirely — kept on a
+  // separate [mode]-only effect (see declaration above) so typing in `seed`
+  // never clears them.
+  useEffect(() => {
+    if (mode !== "artist") {
+      setExtraArtists([]);
+      chipSearch.reset();
+      setActiveChip(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode]);
 
   // Fetch the confirmed artist's published genres. Re-runs on selection AND on tagEpoch
   // bumps (re-selecting the same name, or Style opened). Always resolves `tagsFetched` so
@@ -217,14 +253,69 @@ export function GenerateControls({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [seed, mode]);
 
+  // Close the chip autocomplete on outside click — mirrors the seed-input
+  // effect above, scoped to whichever chip's wrapper is currently active.
+  useEffect(() => {
+    function onOutside(e: MouseEvent) {
+      if (activeChip === null) return;
+      const wrapper = chipDropdownRefs.current[activeChip];
+      if (wrapper && !wrapper.contains(e.target as Node)) {
+        chipSearch.reset();
+        setActiveChip(null);
+      }
+    }
+    document.addEventListener("mousedown", onOutside);
+    return () => document.removeEventListener("mousedown", onOutside);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeChip]);
+
+  // Drive the shared chip autocomplete from whichever chip is active. Skip
+  // one cycle after a selection (chipSelectedByIndex, keyed by THIS chip's
+  // index) so picking a name doesn't immediately re-open the dropdown for
+  // that chip — and so refocusing a *different* already-filled chip doesn't
+  // spuriously reopen it either.
+  useEffect(() => {
+    if (activeChip === null) { chipSearch.reset(); return; }
+    const val = extraArtists[activeChip] ?? "";
+    if (val === (chipSelectedByIndex.current[activeChip] ?? null)) return; // just selected this name — don't reopen the dropdown
+    chipSearch.setQuery(val);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeChip, extraArtists]);
+
+  // Remove chip `i`, keeping `activeChip`, the per-chip "last picked" guard,
+  // and the search itself aligned with the re-indexed array (every chip after
+  // `i` shifts down by one). Without this, removing an earlier chip while a
+  // later one is focused silently retargets the live search at the wrong chip.
+  function removeChip(i: number) {
+    setExtraArtists(extraArtists.filter((_, j) => j !== i));
+    const reindexed: Record<number, string | null> = {};
+    Object.entries(chipSelectedByIndex.current).forEach(([kStr, v]) => {
+      const k = Number(kStr);
+      if (k === i) return;
+      reindexed[k < i ? k : k - 1] = v;
+    });
+    chipSelectedByIndex.current = reindexed;
+    setActiveChip((prev) => {
+      if (prev === null) return null;
+      if (prev === i) { chipSearch.reset(); return null; } // the active chip itself was removed
+      return prev > i ? prev - 1 : prev;
+    });
+  }
+
   // Shared visual style for the artist-name input and the genre autocomplete input.
   const inputClassName = "w-full bg-well border border-border rounded text-xs text-text px-2.5 py-[3px]";
 
   function submit(epoch: number = seedEpoch) {
+    // Only non-blank extra chips count, and only in artist mode. Kept empty
+    // (=> `artists` omitted below, and JSON.stringify drops undefined keys)
+    // for the plain single-artist case so that request is byte-identical to
+    // before this feature existed.
+    const cleanedExtras = mode === "artist" ? extraArtists.map((a) => a.trim()).filter(Boolean) : [];
     const body: GenerateRequestBody = {
       mode,
       tracks,
       artist: mode === "artist" ? seed : undefined,
+      artists: cleanedExtras.length > 0 ? [seed.trim(), ...cleanedExtras] : undefined,
       genre: mode === "genre" ? seed : undefined,
       seed_tracks: mode === "seeds" ? seedDisplays : undefined,
       seed_track_ids: mode === "seeds" ? seedTrackIds : undefined,
@@ -274,40 +365,123 @@ export function GenerateControls({
         {/* Text input: artist mode — free-text with its own name autocomplete */}
         {mode === "artist" && (
           <Cell className="flex-1 min-w-[220px]">
-            <div ref={dropdownRef} className="relative w-full">
-              <input
-                data-testid="seed-input"
-                value={seed}
-                onChange={(e) => { selectedRef.current = null; setSeed(e.target.value); }}
-                onKeyDown={(e) => e.key === "Enter" && submit()}
-                placeholder="Artist name…"
-                className={inputClassName}
-              />
-              {artistSearch.items.length > 0 && (
-                <ul
-                  ref={listRef}
-                  onScroll={() => {
-                    const el = listRef.current;
-                    if (el && el.scrollHeight - el.scrollTop - el.clientHeight < 48) artistSearch.loadMore();
-                  }}
-                  className="absolute z-10 mt-1 w-full bg-panel border border-border rounded shadow-xl max-h-48 overflow-auto"
-                >
-                  {artistSearch.items.map((s) => (
-                    <li
-                      key={s}
-                      onClick={() => { selectedRef.current = s; setSeed(s); artistSearch.reset(); setTagEpoch((e) => e + 1); }}
-                      className="px-2.5 py-1.5 text-xs text-text hover:bg-rowsel cursor-pointer"
+            <div className="flex flex-col gap-1.5 w-full">
+              <div ref={dropdownRef} className="relative w-full">
+                <input
+                  data-testid="seed-input"
+                  value={seed}
+                  onChange={(e) => { selectedRef.current = null; setSeed(e.target.value); }}
+                  onKeyDown={(e) => e.key === "Enter" && submit()}
+                  placeholder="Artist name…"
+                  className={inputClassName}
+                />
+                {artistSearch.items.length > 0 && (
+                  <ul
+                    ref={listRef}
+                    onScroll={() => {
+                      const el = listRef.current;
+                      if (el && el.scrollHeight - el.scrollTop - el.clientHeight < 48) artistSearch.loadMore();
+                    }}
+                    className="absolute z-10 mt-1 w-full bg-panel border border-border rounded shadow-xl max-h-48 overflow-auto"
+                  >
+                    {artistSearch.items.map((s) => (
+                      <li
+                        key={s}
+                        onClick={() => { selectedRef.current = s; setSeed(s); artistSearch.reset(); setTagEpoch((e) => e + 1); }}
+                        className="px-2.5 py-1.5 text-xs text-text hover:bg-rowsel cursor-pointer"
+                      >
+                        {s}
+                      </li>
+                    ))}
+                    {(artistSearch.loading || artistSearch.hasMore) && (
+                      <li className="px-2.5 py-1.5 text-2xs text-faint">
+                        {artistSearch.loading ? "Loading…" : "Scroll for more"}
+                      </li>
+                    )}
+                  </ul>
+                )}
+              </div>
+
+              {/* Multi-artist blend: `seed` is artist #1; chips below add #2..N. */}
+              <div className="flex flex-wrap items-center gap-1.5">
+                {extraArtists.map((name, i) => (
+                  <span
+                    key={i}
+                    ref={(el) => { chipDropdownRefs.current[i] = el; }}
+                    className="relative inline-flex items-center gap-1 rounded-full border border-border bg-well pl-2.5 pr-1 py-[3px]"
+                  >
+                    <input
+                      value={name}
+                      // Only claim the shared search for this chip — do NOT clear its
+                      // "last picked" guard here. Nulling on focus (rather than only on
+                      // an actual edit) is exactly what reopened the dropdown for an
+                      // untouched, already-filled chip on refocus.
+                      onFocus={() => setActiveChip(i)}
+                      onChange={(e) => {
+                        chipSelectedByIndex.current[i] = null;
+                        setActiveChip(i);
+                        setExtraArtists(extraArtists.map((v, j) => (j === i ? e.target.value : v)));
+                      }}
+                      placeholder={i === 0 ? "Second artist…" : "Another artist…"}
+                      className="bg-transparent outline-none text-xs text-text w-28"
+                    />
+                    <button
+                      type="button"
+                      aria-label={`Remove artist ${i + 2}`}
+                      onClick={() => removeChip(i)}
+                      className="text-faint hover:text-text inline-flex items-center justify-center leading-none pointer-coarse:min-h-11 pointer-coarse:min-w-11"
                     >
-                      {s}
-                    </li>
-                  ))}
-                  {(artistSearch.loading || artistSearch.hasMore) && (
-                    <li className="px-2.5 py-1.5 text-2xs text-faint">
-                      {artistSearch.loading ? "Loading…" : "Scroll for more"}
-                    </li>
-                  )}
-                </ul>
-              )}
+                      ×
+                    </button>
+                    {/* Chip autocomplete dropdown — same style as the primary input's,
+                        but narrower-anchored under this chip and width-capped so it
+                        stays readable without forcing horizontal page scroll. Center-anchored
+                        (left-1/2 + -translate-x-1/2) rather than left-0: a chip can sit
+                        anywhere in the wrapping row, including flush against the right edge
+                        on a narrow viewport, and there's no cheap CSS-only way to know which
+                        side has room without measuring the chip's position in JS. Centering
+                        halves the worst-case overflow on either side versus left-anchoring a
+                        wide dropdown off a narrow chip; max-w clamps it to the viewport. */}
+                    {activeChip === i && chipSearch.items.length > 0 && (
+                      <ul
+                        onScroll={(e) => {
+                          const el = e.currentTarget;
+                          if (el.scrollHeight - el.scrollTop - el.clientHeight < 48) chipSearch.loadMore();
+                        }}
+                        className="absolute z-10 top-full left-1/2 -translate-x-1/2 mt-1 w-56 max-w-[calc(100vw-2rem)] bg-panel border border-border rounded shadow-xl max-h-48 overflow-auto"
+                      >
+                        {chipSearch.items.map((s) => (
+                          <li
+                            key={s}
+                            onClick={() => {
+                              chipSelectedByIndex.current[i] = s;
+                              setExtraArtists(extraArtists.map((v, j) => (j === i ? s : v)));
+                              chipSearch.reset();
+                            }}
+                            className="px-2.5 py-1.5 text-xs text-text hover:bg-rowsel cursor-pointer"
+                          >
+                            {s}
+                          </li>
+                        ))}
+                        {(chipSearch.loading || chipSearch.hasMore) && (
+                          <li className="px-2.5 py-1.5 text-2xs text-faint">
+                            {chipSearch.loading ? "Loading…" : "Scroll for more"}
+                          </li>
+                        )}
+                      </ul>
+                    )}
+                  </span>
+                ))}
+                {extraArtists.length < 3 && (
+                  <button
+                    type="button"
+                    onClick={() => setExtraArtists([...extraArtists, ""])}
+                    className="text-xs text-faint hover:text-muted border border-dashed border-border rounded-full px-2.5 py-[3px] pointer-coarse:min-h-11"
+                  >
+                    + Add artist
+                  </button>
+                )}
+              </div>
             </div>
           </Cell>
         )}

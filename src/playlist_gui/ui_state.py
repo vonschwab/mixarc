@@ -89,8 +89,9 @@ class UIStateModel:
     # ─────────────────────────────────────────────────────────────────────────
     artist_queries: List[str] = field(default_factory=list)
     """
-    Artist name chips. For now, only the first is used by the backend.
-    Multi-artist journeys are a future feature.
+    Artist name chips. 2+ entries activate the multi-artist blend
+    (spec 2026-07-29-multi-artist-blend); the first chip remains the
+    primary artist for logging and single-artist fallback.
     """
 
     artist_presence: Literal[

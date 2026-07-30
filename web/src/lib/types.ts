@@ -54,6 +54,10 @@ export interface GenerateRequestBody {
   mode: Mode;
   tracks: number;
   artist?: string;
+  // Multi-artist blend: when set (2+ entries), `artist` is index 0. Sent only
+  // when the user has added at least one extra artist chip — omitted entirely
+  // for a plain single-artist request so the wire payload is unchanged.
+  artists?: string[];
   genre?: string;
   seed_tracks?: string[];
   seed_track_ids?: string[];

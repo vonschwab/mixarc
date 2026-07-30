@@ -6,6 +6,19 @@ import os
 from pathlib import Path
 from typing import Any
 
+# Single source of truth for the ``playlists.min_track_duration_seconds``
+# fallback used when the key is absent from config.yaml. Before this constant
+# existed, every reader hardcoded its own literal and they had quietly drifted
+# apart (47 here, 47 in playlist_generator.py's bridge-side gate, 46 in genre
+# mode and the pier-duration-gate fix, 90 in playlist_gui/worker.py's
+# MergedConfig shim) -- inert only because config.yaml and config.example.yaml
+# both pin the key to 46 explicitly, so a config missing the key would have
+# silently made the bridge floor and the pier floor (or the GUI worker path
+# and the CLI path) disagree by a second or more. 46 is the value that
+# matches shipped reality (config.example.yaml), so it is the one kept.
+# Coordinator review, 2026-07-30 (duration-gate-report.md).
+DEFAULT_MIN_TRACK_DURATION_SECONDS = 46
+
 
 class Config:
     """Configuration manager for MixArc"""
@@ -198,7 +211,9 @@ class Config:
     @property
     def min_track_duration_seconds(self) -> int:
         """Get minimum track duration in seconds (filter out short tracks)"""
-        return self.config.get('playlists', {}).get('min_track_duration_seconds', 47)
+        return self.config.get('playlists', {}).get(
+            'min_track_duration_seconds', DEFAULT_MIN_TRACK_DURATION_SECONDS
+        )
 
     @property
     def max_track_duration_seconds(self) -> int:

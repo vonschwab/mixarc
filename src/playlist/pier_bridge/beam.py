@@ -190,7 +190,7 @@ def _beam_search_segment(
     genre_idf: Optional[np.ndarray] = None,
     genre_vocab: Optional[np.ndarray] = None,
     artist_key_by_idx: Optional[Dict[int, str]] = None,
-    seed_artist_key: Optional[str] = None,
+    seed_artist_keys: frozenset = frozenset(),
     recent_global_artists: Optional[List[str]] = None,
     durations_ms: Optional[np.ndarray] = None,
     artist_identity_cfg: Optional[ArtistIdentityConfig] = None,
@@ -971,14 +971,15 @@ def _beam_search_segment(
                         # Legacy mode: single artist key
                         used_artists_init.add(pier_artist_str)
 
-        if cfg.disallow_seed_artist_in_interiors and seed_artist_key:
-            if use_identity:
-                # Identity mode: resolve seed artist to identity keys
-                seed_identity_keys = resolve_artist_identity_keys(seed_artist_key, artist_identity_cfg)
-                used_artists_init.update(seed_identity_keys)
-            else:
-                # Legacy mode: single seed artist key
-                used_artists_init.add(str(seed_artist_key))
+        if cfg.disallow_seed_artist_in_interiors and seed_artist_keys:
+            for _seed_key in seed_artist_keys:
+                if use_identity:
+                    # Identity mode: resolve seed artist to identity keys
+                    seed_identity_keys = resolve_artist_identity_keys(_seed_key, artist_identity_cfg)
+                    used_artists_init.update(seed_identity_keys)
+                else:
+                    # Legacy mode: single seed artist key
+                    used_artists_init.add(str(_seed_key))
 
     initial_state = BeamState(
         path=[pier_a],

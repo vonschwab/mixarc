@@ -10,7 +10,7 @@ import os
 import math
 import numpy as np
 from .string_utils import normalize_artist_key
-from src.config_loader import resolve_database_path
+from src.config_loader import DEFAULT_MIN_TRACK_DURATION_SECONDS, resolve_database_path
 from src.features.artifacts import load_artifact_bundle
 from src.playlist.ds_pipeline_runner import DsRunResult, generate_playlist_ds as run_ds_pipeline
 from src.playlist.artist_style import (
@@ -361,7 +361,9 @@ class PlaylistGenerator:
         if metadata is None:
             return set()
 
-        min_seconds = self.config.get("playlists", "min_track_duration_seconds", default=47)
+        min_seconds = self.config.get(
+            "playlists", "min_track_duration_seconds", default=DEFAULT_MIN_TRACK_DURATION_SECONDS
+        )
         min_ms = int(min_seconds * 1000)
         max_ms = 0
         cutoff_multiplier = float(
@@ -601,6 +603,8 @@ class PlaylistGenerator:
         audit_context_extra: Optional[Dict[str, Any]] = None,
         pace_mode: Optional[str] = None,
         tag_anchor_track_ids: Optional[Set[str]] = None,
+        seed_artist_keys_override: Optional[Sequence[str]] = None,
+        multi_artist_group_count: int = 1,
     ) -> List[Dict[str, Any]]:
         """
         Run DS pipeline and return ordered track dicts; raise on failure.
@@ -989,6 +993,8 @@ class PlaylistGenerator:
             internal_connector_max_per_segment=internal_connector_max_per_segment,
             internal_connector_priority=internal_connector_priority,
             tag_anchor_track_ids=tag_anchor_track_ids,
+            seed_artist_keys_override=seed_artist_keys_override,
+            multi_artist_group_count=multi_artist_group_count,
         )
 
         tracks: List[Dict[str, Any]] = []
@@ -1489,6 +1495,7 @@ class PlaylistGenerator:
         random_seed: Optional[int] = None,
         popular_seeds_mode: str = "off",
         popularity_mode: str = "off",
+        artist_names: Optional[List[str]] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         Create a single playlist for a specific artist without requiring listening history
@@ -1496,6 +1503,11 @@ class PlaylistGenerator:
         Args:
             artist_name: Name of the artist to create playlist for
             track_count: Target number of tracks in playlist
+            artist_names: Optional 2+ artist names for the multi-artist blend.
+                When given with >=2 entries, piers are drawn from the region the
+                artists share (spec 2026-07-29-multi-artist-blend-design.md).
+                artist_name remains the first/primary name for logging and
+                fallback.
 
         Returns:
             Playlist dictionary with tracks and metadata, or None if unable to create
@@ -1527,6 +1539,27 @@ class PlaylistGenerator:
             t for t in all_library_tracks
             if safe_get_artist_key(t) == artist_key
         ]
+
+        # Multi-artist blend (review Finding 3): a thin PRIMARY chip must not
+        # abort generation before the blend's own group logic
+        # (partition_artist_groups / select_multi_artist_piers, which run
+        # much further down) gets a chance to run -- they are written to
+        # handle exactly this: drop the thin chip, or build piers from the
+        # surviving chip(s) plus any joint credit. Both early "not enough
+        # tracks" returns below previously looked at `artist_tracks`
+        # (primary-only), so a thin FIRST chip aborted even when a
+        # well-stocked second chip was requested alongside it -- swapping
+        # chip order made the identical pairing succeed. Compute every
+        # requested chip's combined library reach once, up front, and let
+        # both early returns below consult it before giving up.
+        _early_ma_names = [n for n in (artist_names or []) if str(n).strip()]
+        _ma_combined_track_count: Optional[int] = None
+        if len(_early_ma_names) >= 2:
+            _combined_keys = {normalize_artist_key(n) for n in _early_ma_names}
+            _ma_combined_track_count = len({
+                t.get('rating_key') for t in all_library_tracks
+                if safe_get_artist_key(t) in _combined_keys
+            })
 
         # Mix in collaborations when explicitly requested, or as a fallback when
         # the artist has too few solo tracks to seed from.
@@ -1565,17 +1598,33 @@ class PlaylistGenerator:
                     len(artist_tracks), solo_count, len(collaboration_tracks),
                 )
             elif solo_count < 4:
-                logger.warning(
-                    "Artist has only %d tracks and no collaborations found, need at least 4",
-                    solo_count,
-                )
-                return None
+                if _ma_combined_track_count is not None and _ma_combined_track_count >= 4:
+                    logger.info(
+                        "Multi-artist: primary chip '%s' has only %d solo track(s) and no "
+                        "collaborations, but the pairing %s has %d combined -- continuing "
+                        "to blend pier selection instead of aborting (review Finding 3).",
+                        artist_name, solo_count, _early_ma_names, _ma_combined_track_count,
+                    )
+                else:
+                    logger.warning(
+                        "Artist has only %d tracks and no collaborations found, need at least 4",
+                        solo_count,
+                    )
+                    return None
             elif include_collaborations:
                 logger.info("No collaboration tracks found for %s; using solo tracks only", artist_name)
 
         if len(artist_tracks) < 4:
-            logger.warning(f"Artist has only {len(artist_tracks)} total tracks (including collaborations), need at least 4")
-            return None
+            if _ma_combined_track_count is not None and _ma_combined_track_count >= 4:
+                logger.info(
+                    "Multi-artist: primary chip '%s' has only %d track(s) (including "
+                    "collaborations), but the pairing %s has %d combined -- continuing "
+                    "to blend pier selection instead of aborting (review Finding 3).",
+                    artist_name, len(artist_tracks), _early_ma_names, _ma_combined_track_count,
+                )
+            else:
+                logger.warning(f"Artist has only {len(artist_tracks)} total tracks (including collaborations), need at least 4")
+                return None
 
         logger.info(f"Using {len(artist_tracks)} tracks for {artist_name}")
 
@@ -1910,6 +1959,13 @@ class PlaylistGenerator:
         style_allowed_track_ids: Optional[List[str]] = None
         style_ds_allowed_track_ids: Optional[List[str]] = None
         internal_connector_ids: Optional[List[str]] = None
+        # Initialized here (not just inside the try block below) so the
+        # Finding-5 relaxation merge at this function's ds_tracks
+        # reconvergence point can safely check it even when the artist-style
+        # block below never runs at all (style_cfg.enabled False, artist_only,
+        # track_title, or fixed_seed_tracks) -- all of which are ordinary
+        # single-artist paths with nothing to merge.
+        _multi_artist_relaxations: List[Dict[str, Any]] = []
 
         if style_cfg.enabled and artifact_path and (not artist_only) and (not track_title) and not fixed_seed_tracks:
             try:
@@ -2064,17 +2120,31 @@ class PlaylistGenerator:
                 _relaxed_excluded = None
                 if exclude_seed_tracks_from_recency and seed_recency_excluded_ids:
                     from src.playlist.seed_eligibility import seed_recency_exclusion_for_presence
+                    # Multi-artist blend (review Finding 4): recency re-admission
+                    # must cover every requested chip, not just the primary --
+                    # `_early_ma_names` was computed above alongside the thin-
+                    # first-chip gate (Finding 3). Scoping this to `artist_name`
+                    # alone left chip #2..N's recently-played tracks hard-
+                    # excluded, so their groups fell under the cluster floor and
+                    # the user saw a false "not enough tracks in your library"
+                    # notice for a catalog they own in full. A single-artist call
+                    # (no second chip) collapses this to exactly today's set --
+                    # `_early_ma_names` is empty, so the loop below runs once,
+                    # over `artist_name`, same as the code it replaces.
+                    _recency_scope_names = list(dict.fromkeys([artist_name] + _early_ma_names))
+                    _recency_scope_indices: List[int] = []
+                    for _recency_name in _recency_scope_names:
+                        _recency_scope_indices.extend(_artist_indices_in_bundle(
+                            bundle, _recency_name, include_collaborations=include_collaborations))
+                    _recency_scope_indices = list(dict.fromkeys(_recency_scope_indices))
                     _artist_ids = {
-                        str(bundle.track_ids[i]) for i in _artist_indices_in_bundle(
-                            bundle, artist_name, include_collaborations=include_collaborations)
+                        str(bundle.track_ids[i]) for i in _recency_scope_indices
                     }
                     _rank = None
                     if popularity_values is not None:
-                        _idxs = _artist_indices_in_bundle(
-                            bundle, artist_name, include_collaborations=include_collaborations)
                         _rank = [
                             str(bundle.track_ids[i]) for i in sorted(
-                                _idxs, key=lambda i: float(popularity_values[i]), reverse=True)
+                                _recency_scope_indices, key=lambda i: float(popularity_values[i]), reverse=True)
                         ]
                     _relaxed_excluded = seed_recency_exclusion_for_presence(
                         _artist_ids, seed_recency_excluded_ids, target_pier_count,
@@ -2083,9 +2153,9 @@ class PlaylistGenerator:
                     _readmitted = len(seed_recency_excluded_ids) - len(_relaxed_excluded or set())
                     if _readmitted:
                         logger.info(
-                            "Seed presence: re-admitted %d recently-played %s track(s) to fill "
-                            "target_piers=%d (fresh pool was short)",
-                            _readmitted, artist_name, target_pier_count,
+                            "Seed presence: re-admitted %d recently-played track(s) across "
+                            "%s to fill target_piers=%d (fresh pool was short)",
+                            _readmitted, _recency_scope_names, target_pier_count,
                         )
 
                 # --- Tag-first pier member set M (authority on-tag; None => legacy) ---
@@ -2137,170 +2207,338 @@ class PlaylistGenerator:
                     logger.warning(
                         "Tag-first piers enabled but X_genre_dense absent — legacy pier selection.")
 
-                clusters, medoids, medoids_by_cluster, X_norm, support_by_index = cluster_artist_tracks(
-                    bundle=bundle,
-                    artist_name=artist_name,
-                    cfg=style_cfg,
-                    random_seed=cluster_seed,
-                    medoid_top_k=medoid_top_k,
-                    include_collaborations=include_collaborations,
-                    excluded_track_ids=_relaxed_excluded,
-                    popularity_values=popularity_values,
-                    metadata_db_path=resolve_database_path(self.config),
-                    steering_target=steering_target,
-                    sonic_tag_affinity=sonic_tag_affinity,
-                    sonic_tag_weight=sonic_tag_weight,
-                    target_pier_count=target_pier_count,
-                    restrict_to_track_ids=_M_ids,
-                )
-                _terminal_avoidance_support = (
-                    support_by_index if style_cfg.pier_support_terminal_avoidance else None
-                )
-                # 🔥 Pure-hits piers: override cluster medoids with the artist's top-N
-                # most-popular tracks (selection only — order_clusters still sequences them).
-                if popular_seeds_mode == "fire" and popularity_values is not None:
-                    _all_members = [i for _cluster in clusters for i in _cluster]
-                    _fire_piers = select_popular_piers(_all_members, popularity_values, target_pier_count)
-                    if _fire_piers:
-                        logger.info(
-                            "Popular Seeds 🔥: overriding %d cluster-medoid piers with top-%d popular tracks",
-                            len(medoids), len(_fire_piers),
-                        )
-                        medoids = _fire_piers
-                    else:
-                        logger.warning(
-                            "Popular Seeds 🔥: no popular piers resolved (uncached artist?) — "
-                            "falling back to cluster-medoid piers",
-                        )
-                if not medoids:
-                    raise ValueError("Style clustering returned no medoids")
-                _xgd = getattr(bundle, "X_genre_dense", None)
-                # `clusters`/`_all_members` are already restricted to M when _M_ids was
-                # set (cluster_artist_tracks(restrict_to_track_ids=_M_ids)), so every
-                # branch below that scores/selects over `clusters` or `_all_members` is
-                # automatically "within M" without further filtering.
-                _all_members = [i for _cluster in clusters for i in _cluster]
-                _on_within_tag = (
-                    _M_ids is not None
-                    and popular_seeds_mode == "on"
-                    and popularity_values is not None
-                )
-                if _on_within_tag:
-                    # Tag-first piers (ON): most-popular WITHIN the on-tag member set M.
-                    _tag_pop_piers = select_popular_piers(_all_members, popularity_values, target_pier_count)
-                    if _tag_pop_piers:
-                        logger.info(
-                            "Tag-first piers (ON): top-%d popular WITHIN %d on-tag member(s)",
-                            len(_tag_pop_piers), len(_all_members),
-                        )
-                        medoids = _tag_pop_piers
-                    else:
-                        logger.warning(
-                            "Tag-first piers (ON): no popular piers resolved within on-tag "
-                            "members — falling back to cluster-medoid piers",
-                        )
-                    ordered_medoids = _cap_order(
-                        medoids, X_norm, target_pier_count, _terminal_avoidance_support
+                # ── Multi-artist blend (spec 2026-07-29) ─────────────────────
+                # Owns pier selection outright when 2+ artist groups survive
+                # partition: the tag-steering pier-allocation branches and the
+                # on-tag anchor injection below are skipped, so two pier
+                # selectors never fight (logged below). select_multi_artist_piers
+                # has three outcomes: None (fewer than two groups survived --
+                # fall through to the unchanged single-artist path below,
+                # nothing to explain), a MultiArtistPiers (success -- its piers
+                # own ordered_medoids and its relaxations fold into this run's
+                # warnings), or MultiArtistBlendFailed (2+ groups survived but
+                # none could cluster -- caught explicitly below, its
+                # relaxations surfaced, then fall back to single-artist
+                # generation). A bare ValueError for a malformed artifact
+                # (missing artist_keys/X_sonic) is a data problem, not a
+                # "this pairing didn't work" problem -- it must never be
+                # swallowed by the broad `except Exception` below, so it is
+                # tagged here and re-raised; see that handler for the other
+                # half of this contract.
+                # Hard minimum-duration gate on PIER candidacy (not just the
+                # bridge/candidate pool, which already enforces this via
+                # _build_duration_exclusions_for_ds inside
+                # _maybe_generate_ds_playlist). A sub-minimum pier -- an
+                # interlude, outtake, intro, or skit -- infects the whole
+                # segment built around it, so this matters MORE for piers than
+                # for bridge tracks. Same config key the bridge side and genre
+                # mode already read; no new knob. Enforced once, inside
+                # cluster_artist_tracks itself (the single choke point both the
+                # single-artist and multi-artist calls below route through),
+                # so a future caller cannot bypass it by forgetting a pre-filter.
+                _min_pier_duration_seconds = int(
+                    self.config.get(
+                        "playlists", "min_track_duration_seconds",
+                        default=DEFAULT_MIN_TRACK_DURATION_SECONDS,
                     )
-                elif (
-                    steering_target is not None
-                    and popular_seeds_mode != "fire"
-                    and _xgd is not None
-                ):
-                    # Tag-weighted pier allocation: skew slots toward on-tag clusters
-                    # (soft; floor 1 per cluster keeps the arc). Off-tag clusters
-                    # (e.g. an artist's interludes) contribute fewer piers. When _M_ids
-                    # is set, `clusters` already contains only on-tag members, so this
-                    # is tag-first arc-over-M (OFF mode); when _M_ids is None (legacy /
-                    # tag_first_pier_selection disabled / no on-tag tracks), this is the
-                    # unchanged tag-skew allocation over the full artist catalog.
-                    _xgd = np.asarray(_xgd, dtype=float)
-                    _tgt = np.asarray(steering_target, dtype=float)
-                    cluster_affinities = [
-                        (float(np.mean(_xgd[members] @ _tgt))
-                         + (sonic_tag_weight * float(np.mean(sonic_tag_affinity[members]))
-                            if sonic_tag_affinity is not None else 0.0))
-                        if len(members) else 0.0
-                        for members in clusters
-                    ]
-                    pier_tag_skew = float(_pb_cfg_dict.get("pier_tag_skew", 0.6))
-                    selected = allocate_piers_by_tag_affinity(
-                        medoids_by_cluster, cluster_affinities, target_pier_count, pier_tag_skew,
+                )
+                _ma_piers = None
+                _multi_artist_relaxations: List[Dict[str, Any]] = []
+                _ma_names = [n for n in (artist_names or []) if str(n).strip()]
+                if len(_ma_names) >= 2:
+                    from src.playlist.multi_artist import (
+                        MultiArtistBlendFailed,
+                        multi_artist_config_from_ds,
+                        select_multi_artist_piers,
                     )
-                    ordered_medoids = order_clusters(selected, X_norm)
-                    if _terminal_avoidance_support is not None:
-                        ordered_medoids, _changed = reorder_avoiding_low_support_terminal(
-                            ordered_medoids, _terminal_avoidance_support, X_norm
+                    _ma_cfg = multi_artist_config_from_ds(ds_cfg)
+                    if not _ma_cfg.enabled:
+                        logger.warning(
+                            "Multi-artist: %d artists requested but "
+                            "playlists.ds_pipeline.multi_artist.enabled is false — "
+                            "generating from '%s' alone.", len(_ma_names), artist_name,
                         )
-                        if _changed:
-                            logger.info(
-                                "Arc-aware ordering: moved the lowest-support pier off the "
-                                "terminal seat (tag-steering allocation path)",
+                    else:
+                        try:
+                            _ma_piers = select_multi_artist_piers(
+                                bundle=bundle,
+                                artist_names=_ma_names,
+                                style_cfg=style_cfg,
+                                ma_cfg=_ma_cfg,
+                                track_count=track_count,
+                                max_artist_fraction=max_artist_fraction,
+                                random_seed=cluster_seed,
+                                include_collaborations=include_collaborations,
+                                excluded_track_ids=_relaxed_excluded,
+                                metadata_db_path=resolve_database_path(self.config),
+                                min_pier_duration_seconds=_min_pier_duration_seconds,
                             )
-                    logger.info(
-                        "Tag steering pier allocation: skew=%.2f cluster_affinities=%s selected=%d/%d",
-                        pier_tag_skew,
-                        [round(a, 3) for a in cluster_affinities],
-                        len(selected), len(medoids),
+                        except MultiArtistBlendFailed as _ma_exc:
+                            logger.warning(
+                                "Multi-artist: blend failed for %s — falling back to "
+                                "single-artist generation from '%s': %s",
+                                _ma_names, artist_name, _ma_exc,
+                            )
+                            _multi_artist_relaxations = list(_ma_exc.relaxations)
+                            _ma_piers = None
+                        except ValueError as _ma_ve:
+                            # Malformed artifact -- must propagate loudly, never be
+                            # folded into the generic artist-style fallback below.
+                            _ma_ve._multi_artist_integrity_error = True
+                            raise
+
+                if _ma_piers is not None:
+                    if steering_target is not None:
+                        logger.info(
+                            "Multi-artist owns pier selection — tag-steering pier "
+                            "allocation and anchor injection are skipped this run "
+                            "(the candidate-pool tag lever is unaffected).",
+                        )
+                    if popular_seeds_mode in {"on", "fire"}:
+                        # Review Finding 9: select_multi_artist_piers has no
+                        # popularity term and never receives popularity_values --
+                        # a configured knob that cannot act must warn loudly, not
+                        # silently no-op (project gotcha). Genuinely popularity-
+                        # biased blend piers are a separate, optional enhancement;
+                        # this is the required minimum.
+                        logger.warning(
+                            "Multi-artist: Popular Seeds mode '%s' has no effect on "
+                            "blend pier selection — select_multi_artist_piers picks "
+                            "piers by sonic/genre overlap only, with no popularity "
+                            "term. This dial is a no-op while 2+ artists are blended.",
+                            popular_seeds_mode,
+                        )
+                    ordered_medoids = list(_ma_piers.ordered_medoids)
+                    _multi_artist_blocked_keys = _ma_piers.blocked_artist_keys
+                    _multi_artist_relaxations = list(_ma_piers.relaxations)
+                    # max_artist_fraction means EACH seed artist's share of the
+                    # playlist (the same reading Task 5's total_pier_budget = n *
+                    # base already applies to the pier budget) -- so the
+                    # post-order per-artist cap must scale by the same n (every
+                    # surviving group, joint included) or a legitimate N-artist
+                    # pier allocation self-reports as "degraded" on every
+                    # successful blend (human ruling, task-10 review).
+                    _multi_artist_group_count = len(_ma_piers.groups)
+
+                    # Review Finding 8: arc-aware terminal-avoidance reorder.
+                    # select_multi_artist_piers's own per-group cluster_artist_
+                    # tracks calls already compute within-artist support
+                    # (support_by_index) -- this mirrors the single-artist tail's
+                    # _cap_order / explicit reorder_avoiding_low_support_terminal
+                    # calls, using the SAME shared function, so a blend cannot
+                    # seat a sonic-outlier pier in the closing seat just because
+                    # order_with_alternation (forced max alternation + minimax
+                    # sonic edge, 2026-07-30) has no notion of within-artist
+                    # support.
+                    if style_cfg.pier_support_terminal_avoidance and _ma_piers.support_by_index:
+                        _ma_xraw = np.asarray(getattr(bundle, "X_sonic"), dtype=float)
+                        _ma_xnorm = _ma_xraw / (np.linalg.norm(_ma_xraw, axis=1, keepdims=True) + 1e-12)
+                        ordered_medoids, _ma_terminal_changed = reorder_avoiding_low_support_terminal(
+                            ordered_medoids, _ma_piers.support_by_index, _ma_xnorm,
+                        )
+                        if _ma_terminal_changed:
+                            logger.info(
+                                "Multi-artist arc-aware ordering: moved the lowest-support "
+                                "pier off the terminal seat (support=%.3f) via an alternate "
+                                "sonic-order start",
+                                min(_ma_piers.support_by_index.get(i, 1.0) for i in ordered_medoids),
+                            )
+
+                    # Review Finding 2: blend piers must pass the same title-
+                    # exclusion filter the single-artist tail applies
+                    # (self._filter_title_excluded_bundle_indices, below) --
+                    # otherwise a blend medoid matching a user title-exclusion
+                    # word seats as a pier and _post_order_validate_ds_output
+                    # aborts the WHOLE generation later with no recovery path
+                    # (exempt_pier_track_ids only covers the recency check).
+                    ordered_medoids = self._filter_title_excluded_bundle_indices(
+                        bundle, ordered_medoids, context="artist_style_piers",
                     )
+                    if not ordered_medoids:
+                        raise ValueError("Multi-artist style piers empty after title exclusions")
+
+                    # Diagnostics-only stand-ins for the single-artist clustering
+                    # locals style_summary / the ENABLED log below read: one
+                    # "cluster" per artist group, its seated piers as members.
+                    # Built AFTER the terminal-avoidance reorder and title filter
+                    # above so they reflect the FINAL pier set, not the
+                    # pre-adjustment one.
+                    clusters = [list(g.indices) for g in _ma_piers.groups]
+                    _ma_group_sets = [set(g.indices) for g in _ma_piers.groups]
+                    medoids_by_cluster = [
+                        [m for m in ordered_medoids if m in gs] for gs in _ma_group_sets
+                    ]
+                    _tag_anchor_ids = None
                 else:
-                    ordered_medoids = _cap_order(
-                        medoids, X_norm, target_pier_count, _terminal_avoidance_support
-                    )
+                    _multi_artist_blocked_keys = None
+                    _multi_artist_group_count = 1
 
-                ordered_medoids = self._filter_title_excluded_bundle_indices(
-                    bundle,
-                    ordered_medoids,
-                    context="artist_style_piers",
-                )
-                if not ordered_medoids:
-                    raise ValueError("Artist style piers empty after title exclusions")
-
-                # Tag steering on-tag ANCHORS (Phase B): inject representative on-tag tracks as
-                # piers so a sonically-peripheral clique is GUARANTEED to appear (bridges alone
-                # can't place them — see the bridge-side Phase A result). Selection is bridgeable
-                # + tag-central + diverse; gated on steering; capped so interiors aren't starved.
-                _tag_anchor_ids: Optional[Set[str]] = None
-                _anchor_max = int((ds_cfg.get("pier_bridge", {}) or {}).get("tag_steering_anchor_max", 3))
-                if steering_target is not None and _on_tag_track_ids and _anchor_max > 0:
-                    from src.playlist.tag_steering import select_on_tag_anchors
-                    _on_tag_rows = [_t2r[t] for t in _on_tag_track_ids if t in _t2r]
-                    _existing = set(int(m) for m in ordered_medoids)
-                    _on_tag_rows = [r for r in _on_tag_rows if r not in _existing]
-                    _pbc = (ds_cfg.get("pier_bridge", {}) or {})
-                    _anchors = select_on_tag_anchors(
-                        on_tag_indices=_on_tag_rows,
-                        pier_indices=list(ordered_medoids),
-                        X_sonic=getattr(bundle, "X_sonic", None),
-                        tag_centrality=sonic_tag_affinity,   # centered sonic affinity to the tag prototype (or None)
-                        artist_keys=bundle.track_artists,
-                        track_ids=bundle.track_ids,
-                        max_anchors=_anchor_max,
-                        min_bridge=float(_pbc.get("tag_steering_anchor_min_bridge", 0.35)),
-                        per_artist=int(_pbc.get("tag_steering_anchor_per_artist", 1)),
+                if _ma_piers is None:
+                    clusters, medoids, medoids_by_cluster, X_norm, support_by_index = cluster_artist_tracks(
+                        bundle=bundle,
+                        artist_name=artist_name,
+                        cfg=style_cfg,
+                        random_seed=cluster_seed,
+                        medoid_top_k=medoid_top_k,
+                        include_collaborations=include_collaborations,
+                        excluded_track_ids=_relaxed_excluded,
+                        popularity_values=popularity_values,
+                        metadata_db_path=resolve_database_path(self.config),
+                        steering_target=steering_target,
+                        sonic_tag_affinity=sonic_tag_affinity,
+                        sonic_tag_weight=sonic_tag_weight,
+                        target_pier_count=target_pier_count,
+                        restrict_to_track_ids=_M_ids,
+                        min_pier_duration_seconds=_min_pier_duration_seconds,
                     )
-                    if _anchors:
-                        _cap = int(target_pier_count) + _anchor_max
-                        ordered_medoids = (list(ordered_medoids) + _anchors)[:_cap]
-                        logger.info(
-                            "Tag steering on-tag anchors: injected %d on-tag pier(s) across %d artist(s): %s",
-                            len(_anchors), len({str(bundle.track_artists[a]) for a in _anchors}),
-                            [str(bundle.track_ids[a]) for a in _anchors],
+                    _terminal_avoidance_support = (
+                        support_by_index if style_cfg.pier_support_terminal_avoidance else None
+                    )
+                    # 🔥 Pure-hits piers: override cluster medoids with the artist's top-N
+                    # most-popular tracks (selection only — order_clusters still sequences them).
+                    if popular_seeds_mode == "fire" and popularity_values is not None:
+                        _all_members = [i for _cluster in clusters for i in _cluster]
+                        _fire_piers = select_popular_piers(_all_members, popularity_values, target_pier_count)
+                        if _fire_piers:
+                            logger.info(
+                                "Popular Seeds 🔥: overriding %d cluster-medoid piers with top-%d popular tracks",
+                                len(medoids), len(_fire_piers),
+                            )
+                            medoids = _fire_piers
+                        else:
+                            logger.warning(
+                                "Popular Seeds 🔥: no popular piers resolved (uncached artist?) — "
+                                "falling back to cluster-medoid piers",
+                            )
+                    if not medoids:
+                        raise ValueError("Style clustering returned no medoids")
+                    _xgd = getattr(bundle, "X_genre_dense", None)
+                    # `clusters`/`_all_members` are already restricted to M when _M_ids was
+                    # set (cluster_artist_tracks(restrict_to_track_ids=_M_ids)), so every
+                    # branch below that scores/selects over `clusters` or `_all_members` is
+                    # automatically "within M" without further filtering.
+                    _all_members = [i for _cluster in clusters for i in _cluster]
+                    _on_within_tag = (
+                        _M_ids is not None
+                        and popular_seeds_mode == "on"
+                        and popularity_values is not None
+                    )
+                    if _on_within_tag:
+                        # Tag-first piers (ON): most-popular WITHIN the on-tag member set M.
+                        _tag_pop_piers = select_popular_piers(_all_members, popularity_values, target_pier_count)
+                        if _tag_pop_piers:
+                            logger.info(
+                                "Tag-first piers (ON): top-%d popular WITHIN %d on-tag member(s)",
+                                len(_tag_pop_piers), len(_all_members),
+                            )
+                            medoids = _tag_pop_piers
+                        else:
+                            logger.warning(
+                                "Tag-first piers (ON): no popular piers resolved within on-tag "
+                                "members — falling back to cluster-medoid piers",
+                            )
+                        ordered_medoids = _cap_order(
+                            medoids, X_norm, target_pier_count, _terminal_avoidance_support
                         )
-                        # Hand the anchors' identity to the builder so it places them
-                        # in gaps rather than re-ordering them as co-equal piers.
-                        # Read back from ordered_medoids, NOT from _anchors: the
-                        # `[:_cap]` truncation above can drop the tail.
-                        _capped = set(int(m) for m in ordered_medoids)
-                        _tag_anchor_ids = {
-                            str(bundle.track_ids[a]) for a in _anchors if int(a) in _capped
-                        }
+                    elif (
+                        steering_target is not None
+                        and popular_seeds_mode != "fire"
+                        and _xgd is not None
+                    ):
+                        # Tag-weighted pier allocation: skew slots toward on-tag clusters
+                        # (soft; floor 1 per cluster keeps the arc). Off-tag clusters
+                        # (e.g. an artist's interludes) contribute fewer piers. When _M_ids
+                        # is set, `clusters` already contains only on-tag members, so this
+                        # is tag-first arc-over-M (OFF mode); when _M_ids is None (legacy /
+                        # tag_first_pier_selection disabled / no on-tag tracks), this is the
+                        # unchanged tag-skew allocation over the full artist catalog.
+                        _xgd = np.asarray(_xgd, dtype=float)
+                        _tgt = np.asarray(steering_target, dtype=float)
+                        cluster_affinities = [
+                            (float(np.mean(_xgd[members] @ _tgt))
+                             + (sonic_tag_weight * float(np.mean(sonic_tag_affinity[members]))
+                                if sonic_tag_affinity is not None else 0.0))
+                            if len(members) else 0.0
+                            for members in clusters
+                        ]
+                        pier_tag_skew = float(_pb_cfg_dict.get("pier_tag_skew", 0.6))
+                        selected = allocate_piers_by_tag_affinity(
+                            medoids_by_cluster, cluster_affinities, target_pier_count, pier_tag_skew,
+                        )
+                        ordered_medoids = order_clusters(selected, X_norm)
+                        if _terminal_avoidance_support is not None:
+                            ordered_medoids, _changed = reorder_avoiding_low_support_terminal(
+                                ordered_medoids, _terminal_avoidance_support, X_norm
+                            )
+                            if _changed:
+                                logger.info(
+                                    "Arc-aware ordering: moved the lowest-support pier off the "
+                                    "terminal seat (tag-steering allocation path)",
+                                )
+                        logger.info(
+                            "Tag steering pier allocation: skew=%.2f cluster_affinities=%s selected=%d/%d",
+                            pier_tag_skew,
+                            [round(a, 3) for a in cluster_affinities],
+                            len(selected), len(medoids),
+                        )
                     else:
-                        logger.info(
-                            "Tag steering on-tag anchors: 0 bridgeable on-tag tracks (min_bridge=%.2f) — "
-                            "no anchors injected (Phase-A bridges only).",
-                            float(_pbc.get("tag_steering_anchor_min_bridge", 0.35)),
+                        ordered_medoids = _cap_order(
+                            medoids, X_norm, target_pier_count, _terminal_avoidance_support
                         )
+
+                    ordered_medoids = self._filter_title_excluded_bundle_indices(
+                        bundle,
+                        ordered_medoids,
+                        context="artist_style_piers",
+                    )
+                    if not ordered_medoids:
+                        raise ValueError("Artist style piers empty after title exclusions")
+
+                    # Tag steering on-tag ANCHORS (Phase B): inject representative on-tag tracks as
+                    # piers so a sonically-peripheral clique is GUARANTEED to appear (bridges alone
+                    # can't place them — see the bridge-side Phase A result). Selection is bridgeable
+                    # + tag-central + diverse; gated on steering; capped so interiors aren't starved.
+                    _tag_anchor_ids: Optional[Set[str]] = None
+                    _anchor_max = int((ds_cfg.get("pier_bridge", {}) or {}).get("tag_steering_anchor_max", 3))
+                    if steering_target is not None and _on_tag_track_ids and _anchor_max > 0:
+                        from src.playlist.tag_steering import select_on_tag_anchors
+                        _on_tag_rows = [_t2r[t] for t in _on_tag_track_ids if t in _t2r]
+                        _existing = set(int(m) for m in ordered_medoids)
+                        _on_tag_rows = [r for r in _on_tag_rows if r not in _existing]
+                        _pbc = (ds_cfg.get("pier_bridge", {}) or {})
+                        _anchors = select_on_tag_anchors(
+                            on_tag_indices=_on_tag_rows,
+                            pier_indices=list(ordered_medoids),
+                            X_sonic=getattr(bundle, "X_sonic", None),
+                            tag_centrality=sonic_tag_affinity,   # centered sonic affinity to the tag prototype (or None)
+                            artist_keys=bundle.track_artists,
+                            track_ids=bundle.track_ids,
+                            max_anchors=_anchor_max,
+                            min_bridge=float(_pbc.get("tag_steering_anchor_min_bridge", 0.35)),
+                            per_artist=int(_pbc.get("tag_steering_anchor_per_artist", 1)),
+                        )
+                        if _anchors:
+                            _cap = int(target_pier_count) + _anchor_max
+                            ordered_medoids = (list(ordered_medoids) + _anchors)[:_cap]
+                            logger.info(
+                                "Tag steering on-tag anchors: injected %d on-tag pier(s) across %d artist(s): %s",
+                                len(_anchors), len({str(bundle.track_artists[a]) for a in _anchors}),
+                                [str(bundle.track_ids[a]) for a in _anchors],
+                            )
+                            # Hand the anchors' identity to the builder so it places them
+                            # in gaps rather than re-ordering them as co-equal piers.
+                            # Read back from ordered_medoids, NOT from _anchors: the
+                            # `[:_cap]` truncation above can drop the tail.
+                            _capped = set(int(m) for m in ordered_medoids)
+                            _tag_anchor_ids = {
+                                str(bundle.track_ids[a]) for a in _anchors if int(a) in _capped
+                            }
+                        else:
+                            logger.info(
+                                "Tag steering on-tag anchors: 0 bridgeable on-tag tracks (min_bridge=%.2f) — "
+                                "no anchors injected (Phase-A bridges only).",
+                                float(_pbc.get("tag_steering_anchor_min_bridge", 0.35)),
+                            )
 
                 # Global admission floor (same as DS candidate admission) --
                 # kept as a diagnostic value (global_sonic_floor below) even
@@ -2490,6 +2728,22 @@ class PlaylistGenerator:
                 pier_cfg = replace(
                     pier_cfg, **roam_kwargs_from_dict((ds_cfg.get("pier_bridge") or {}).get("roam"))
                 )
+                # Multi-artist blend (design spec §3.7): every chip artist is
+                # disallowed in ALL interiors, not just a pier's own adjacent
+                # segments -- disallow_pier_artists_in_interiors only covers the
+                # latter. _build_artist_pier_config never threads
+                # disallow_seed_artist_in_interiors (single-artist Artist mode
+                # leaves it at the PierBridgeConfig default of False), so this
+                # override is scoped to the multi-artist branch only and leaves
+                # single-artist behavior untouched.
+                if _multi_artist_blocked_keys:
+                    pier_cfg = replace(pier_cfg, disallow_seed_artist_in_interiors=True)
+                    logger.info(
+                        "Multi-artist: disallow_seed_artist_in_interiors=True for %d "
+                        "blocked artist key(s) — the chips are the structure, the fill "
+                        "is everything else.",
+                        len(_multi_artist_blocked_keys),
+                    )
 
                 using_artist_style = True
                 pool_source = "artist_style"
@@ -2503,6 +2757,11 @@ class PlaylistGenerator:
                     len(internal_connector_ids or []),
                 )
             except Exception as exc:
+                if getattr(exc, "_multi_artist_integrity_error", False):
+                    # Tagged above: a malformed artifact (missing artist_keys/
+                    # X_sonic) is a data problem, not a "fall back to legacy"
+                    # situation -- must propagate loudly, not be absorbed here.
+                    raise
                 logger.warning(
                     "Artist style mode fallback to legacy (reason=%s)",
                     exc,
@@ -2534,6 +2793,8 @@ class PlaylistGenerator:
                     dry_run=bool(dry_run),
                     audit_context_extra={"style_summary": style_summary},
                     tag_anchor_track_ids=_tag_anchor_ids,
+                    seed_artist_keys_override=_multi_artist_blocked_keys,
+                    multi_artist_group_count=_multi_artist_group_count,
                 )
             except ValueError as e:
                 error_msg = str(e)
@@ -2575,6 +2836,8 @@ class PlaylistGenerator:
                             dry_run=bool(dry_run),
                             audit_context_extra={"style_summary": style_summary},
                             tag_anchor_track_ids=_tag_anchor_ids,
+                            seed_artist_keys_override=_multi_artist_blocked_keys,
+                            multi_artist_group_count=_multi_artist_group_count,
                         )
                         fallback_used = True
                         logger.warning(
@@ -2626,6 +2889,35 @@ class PlaylistGenerator:
                 f"'python scripts/analyze_library.py' (or click \"Analyze Library\" in the GUI) to extract "
                 f"sonic features and rebuild the artifact; or (2) the artifact was rebuilt but this process "
                 f"is still holding an older copy in memory — restart the GUI/worker to pick up the rebuild."
+            )
+
+        # Review Finding 5: fold pier-selection-time multi-artist relaxations
+        # (dropped chips, thin-group failures, low-overlap notice) into this
+        # run's relaxation list -- the same list the web GUI's
+        # RelaxationNotice reads (worker.py filters playlist_stats.playlist.
+        # warnings for type=="relaxation"). Deliberately placed here, at the
+        # reconvergence point of the artist-style and legacy branches (both
+        # set ds_tracks before the check above), rather than nested inside
+        # `if using_artist_style ...:` -- MultiArtistBlendFailed's relaxations
+        # are stashed at the point the blend fails, but generation continues
+        # via the single-artist artist-style fallback in the SAME branch. If
+        # that fallback then also raised (any exception, not just the
+        # pool-too-small ValueError this branch already retries), the broad
+        # `except Exception` around the artist-style block sets
+        # using_artist_style=False and reruns through the `else:` legacy
+        # branch instead -- merging only inside `if using_artist_style:` would
+        # have discarded every relaxation collected so far the instant that
+        # happened, silently defeating the exact plumbing that exists to
+        # explain a blend failure to the user.
+        if _multi_artist_relaxations and self._last_ds_report is not None:
+            _pstats = self._last_ds_report.setdefault("playlist_stats", {})
+            _playlist_stats = _pstats.setdefault("playlist", {})
+            _playlist_stats["warnings"] = (
+                list(_playlist_stats.get("warnings") or []) + _multi_artist_relaxations
+            )
+            logger.info(
+                "Multi-artist: merged %d relaxation(s) into this run's warnings.",
+                len(_multi_artist_relaxations),
             )
 
         # Skip seed insertion for pier-bridge mode - pier-bridge already handles seed placement
@@ -2912,7 +3204,9 @@ class PlaylistGenerator:
         # seeds-mode seed, which keeps its duration exemption), so they must obey
         # the same duration window the bridge pool enforces below — otherwise an
         # outlier like a 77:42 DJ mix can seat as an anchor pier.
-        _min_dur = int(self.config.get("playlists", "min_track_duration_seconds", default=46))
+        _min_dur = int(self.config.get(
+            "playlists", "min_track_duration_seconds", default=DEFAULT_MIN_TRACK_DURATION_SECONDS
+        ))
         _max_dur = int(self.config.get("playlists", "max_track_duration_seconds", default=720))
         member_indices, _dur_removed = genre_mode.filter_member_indices_by_duration(
             member_indices, bundle.durations_ms,
@@ -3003,6 +3297,14 @@ class PlaylistGenerator:
             # contaminants' neighbourhoods and certify them (spec §1.2). Measured
             # on reggae: that mask passed 8941/43547 rows and vetoed 0 of 206.
             bridgeability_eligible_mask=genre_mode.pool_membership_mask(bundle, pool_ids),
+            # member_indices was already duration-filtered above (_min_dur, same
+            # config key) before clustering, so this is belt-and-suspenders, not
+            # load-bearing -- passed explicitly (the real live value, not the
+            # function's own hardcoded default) rather than left to rely on
+            # cluster_artist_tracks's fallback, so a future change to either the
+            # pre-filter or the default can't quietly drift out of sync
+            # (coordinator review 2026-07-30).
+            min_pier_duration_seconds=_min_dur,
         )
 
         # --- Pier-bridgeability veto (spec §3.4, mechanism 1) ---
@@ -3399,6 +3701,20 @@ class PlaylistGenerator:
 
         playlists = []
 
+        # Hard minimum-duration gate on PIER candidacy (coordinator review
+        # 2026-07-30): this history-mode path was found to be the one call
+        # site into cluster_artist_tracks that the pier-duration-gate fix
+        # left unguarded -- a sub-minimum fragment could still seat as a pier
+        # here even though the single-artist and multi-artist Artist-mode
+        # paths were already closed. Same config key those two paths read;
+        # no new knob.
+        _min_pier_duration_seconds = int(
+            self.config.get(
+                "playlists", "min_track_duration_seconds",
+                default=DEFAULT_MIN_TRACK_DURATION_SECONDS,
+            )
+        )
+
         # Pre-order recency exclusions (applied via DS `excluded_track_ids`).
         # IMPORTANT: No recency filtering is allowed after DS ordering.
         excluded_ids_batch: Set[str] = set()
@@ -3550,6 +3866,7 @@ class PlaylistGenerator:
                         random_seed=ds_cfg.get("random_seed", 0),
                         medoid_top_k=medoid_top_k,
                         target_pier_count=target_pier_count,
+                        min_pier_duration_seconds=_min_pier_duration_seconds,
                     )
                     if not medoids:
                         raise ValueError("Style clustering returned no medoids")

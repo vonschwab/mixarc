@@ -80,6 +80,11 @@ matrix, the 15-stage analyze pipeline, and CLI generation examples, see **Quick 
   artist's own published genres — pick up to three to softly lean the playlist toward that facet of
   their catalog. It's an additive nudge, never a hard filter, and with no tags picked the run is
   byte-identical to not using it.
+- **Multi-artist blend (artist mode).** Name two or more artists and the playlist finds the sonic
+  and genre ground they share, instead of traveling from one artist's catalog to the other's.
+  Jointly-credited records get seated as their own pier when they exist. The second and later
+  artist chips share the same name autocomplete as the primary artist field, so a name typed in
+  the wrong form doesn't silently fail to resolve.
 - **Pace as tempo + rhythmic density.** Pace is gated independently of the sonic embedding, using
   BPM and onset-rate log-distance bands plus a soft rhythm penalty — so it keeps working the same
   way regardless of what the sonic embedding is doing, and survives beatless/ambient seeds where

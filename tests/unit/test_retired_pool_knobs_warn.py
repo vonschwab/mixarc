@@ -229,6 +229,23 @@ def test_retired_artist_style_keys_warn():
     }
 
 
+def test_retired_multi_artist_alternation_bonus_warns():
+    """Forced-interleaving rewrite (2026-07-30): order_with_alternation now
+    forces the theoretical max alternation instead of scoring a preference,
+    so multi_artist.alternation_bonus has no weight left to read -- a
+    leftover value in config.yaml must warn loudly, not silently do nothing."""
+    cfg = {"playlists": {"ds_pipeline": {"multi_artist": {
+        "alternation_bonus": 0.15,
+        # NOT retired -- must not appear in `found` below.
+        "overlap_weight": 0.6,
+        "enabled": True,
+    }}}}
+    found = _warn_retired_keys(cfg)
+    assert "multi_artist.alternation_bonus" in found
+    assert "multi_artist.overlap_weight" not in found
+    assert "multi_artist.enabled" not in found
+
+
 def test_clean_config_warns_nothing():
     assert _warn_retired_keys({"playlists": {}}) == []
 

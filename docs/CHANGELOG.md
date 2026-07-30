@@ -1,5 +1,40 @@
 # Playlist Generator Changelog
 
+## Unreleased
+
+### Artist mode
+
+- **Multi-artist blend.** Artist mode accepts 2+ artists and builds every pier from the
+  sonic/genre territory they share, rather than traveling from one artist's catalog to the
+  other's (Brian Eno + Harold Budd skews ambient; Brian Eno + David Bowie skews art rock).
+  Bundle rows split into one exclusive group per artist plus a joint group of jointly-credited
+  tracks; each group gets a centered MuQ prototype, and a soft "overlap affinity" (75% sonic /
+  25% genre by default) biases pier selection toward the other artists' territory — never a
+  gate, so a pairing with no shared ground still generates. New config block:
+  `playlists.ds_pipeline.multi_artist` (`docs/CONFIG.md`, `PLAYLIST_ORDERING_TUNING.md` Knob 13).
+- **Pier duration floor.** `playlists.min_track_duration_seconds` (shipped `46`) is now a hard
+  gate on **pier candidacy**, not just bridge/candidate-pool fill — a sub-minimum fragment
+  (interlude, outtake, intro, skit) can no longer seat as the structural anchor a whole bridge
+  segment is built around. Applied once, inside `cluster_artist_tracks`, at all four pier-selection
+  call sites (single-artist, multi-artist, genre mode, history mode). Unknown/zero duration is
+  kept, not excluded. Starvation warns loudly (names the artist and the removed-track count) and
+  degrades through each path's existing thin-artist handling rather than crashing or silently
+  relaxing. Single-sourced the absent-key fallback as `config_loader.DEFAULT_MIN_TRACK_DURATION_SECONDS`
+  (`46`), reconciling a drift to three different literals (47/46/90) across readers.
+- **Artist chip autocomplete.** The second and later artist chips in a multi-artist blend now share
+  the primary artist field's name autocomplete, so a misspelled or wrong-form chip name doesn't
+  silently fail backend resolution and drop out of the blend.
+- Closed ten coordinator-review findings in the multi-artist blend wiring: blend piers now pass the
+  same title-exclusion filter, terminal-avoidance reordering, and cross-chip recency re-admission
+  the single-artist tail already applies; a joint-only chip (credited solely via collaboration, no
+  solo catalog) no longer silently collapses the blend to single-artist mode; the
+  pier-bridgeability veto's exclusion set now spans every chip's rows, not just the current group's;
+  and Popular Seeds now warns loudly (rather than silently doing nothing) when it has no effect on
+  blend pier selection. See "Known limitations" in `PLAYLIST_ORDERING_TUNING.md` Knob 13 for what
+  is an accepted limitation rather than a bug (Popular Seeds and tag-steering pier allocation are
+  both no-ops on blends; diffuse-catalog artists blend poorly; A/B/A/B interleaving is a preference,
+  not a guarantee).
+
 ## v6.0.0 - Learned Sonic Embedding, Genre Authority, Browser GUI
 
 **Release Date:** 2026-07-11

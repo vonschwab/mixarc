@@ -252,6 +252,32 @@ playlists:
       # already produce, never a new topology, never fails.
       pier_support_terminal_avoidance: true
 
+    # ─────────────────────────────────────────────────────────────────────
+    # Multi-artist blend (spec 2026-07-29-multi-artist-blend-design.md)
+    # Two or more artist chips -> every pier drawn from the region the named
+    # artists share. Inert with a single artist. Soft bias only.
+    # ─────────────────────────────────────────────────────────────────────
+    multi_artist:
+      enabled: true
+      overlap_weight: 0.6          # strength of the pull toward the other artist(s).
+                                   # 0.0 = explicit rollback (piers stay characteristic).
+      genre_share: 0.25            # split within the affinity term; the rest is MuQ.
+      max_artists: 4
+      joint_pier_min_budget: 3     # min total piers before a jointly-credited seat is reserved
+      # alternation_bonus: REMOVED (2026-07-30, forced-interleaving rewrite).
+      # Pier alternation is now a hard constraint (order_with_alternation
+      # forces the highest alternation level that clears pier_adjacency_floor
+      # below, ladder-searching down from the theoretical maximum), not a
+      # scored preference -- there is no bonus weight left to tune. A
+      # leftover value here is caught and warned on loudly at startup
+      # (src.playlist_gui.worker._warn_retired_keys).
+      pier_adjacency_floor: 0.08   # min PIER-TO-PIER edge (not final playlist
+                                   # min_transition -- a different, lower scale)
+                                   # a candidate alternation level must clear to
+                                   # be forced; calibrated 2026-07-30, see
+                                   # multi_artist.py::PIER_ADJACENCY_ALTERNATION_FLOOR
+      low_overlap_threshold: 0.15  # mean pier affinity below this -> report it to the user
+
     # Construction scoring weights
     # score = alpha*seed_sim + beta*transition_sim + gamma*diversity - penalty
     scoring:

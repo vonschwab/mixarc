@@ -15,6 +15,7 @@ class GenerateRequestBody(BaseModel):
     mode: str = "artist"
     tracks: int = 30
     artist: Optional[str] = None
+    artists: list[str] = Field(default_factory=list)
     genre: Optional[str] = None
     seed_tracks: list[str] = Field(default_factory=list)
     seed_track_ids: list[str] = Field(default_factory=list)
@@ -47,6 +48,7 @@ class GenerateRequestBody(BaseModel):
             mode=self.mode,
             tracks=self.tracks,
             artist=self.artist,
+            artists=list(self.artists),
             genre=self.genre,
             seed_tracks=list(self.seed_tracks),
             seed_track_ids=list(self.seed_track_ids),

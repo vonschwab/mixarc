@@ -53,7 +53,7 @@ from src.playlist.analyze_library_results import (
     parse_analyze_library_report,
     parse_analyze_library_stage_progress,
 )
-from src.config_loader import resolve_database_path
+from src.config_loader import DEFAULT_MIN_TRACK_DURATION_SECONDS, resolve_database_path
 from src.playlist.config import resolve_cohesion_mode
 from src.playlist.request_models import GeneratePlaylistRequest, LibraryPipelineRequest
 from .utils.redaction import redact_text
@@ -523,6 +523,20 @@ _RETIRED_ARTIST_STYLE_KEYS = {
     "pool_balance_mode": "build_balanced_candidate_pool deleted (corridor Phase 1 Task 8); pool_balance_mode's only non-default value (proportional_capped) was never implemented anyway",
 }
 
+# playlists.ds_pipeline.multi_artist.alternation_bonus: forced-interleaving
+# rewrite (2026-07-30, docs/superpowers/sdd/2026-07-29-multi-artist-blend/
+# forced-interleaving-report.md). order_with_alternation used to score
+# candidate orders with `sonic path cost + alternation_bonus * artist
+# changes` -- but every candidate came from order_clusters' own greedy
+# nearest-neighbor walk, which structurally clumps same-artist piers, so no
+# amount of bonus weight could ever produce an interleaved order. Alternation
+# is now a hard constraint (the maximum achievable alternation for the actual
+# group sizes is computed and forced, then the minimax-best order among those
+# is picked) -- there is no bonus weight left to tune.
+_RETIRED_MULTI_ARTIST_KEYS = {
+    "alternation_bonus": "order_with_alternation forces the maximum achievable alternation now (forced-interleaving rewrite, 2026-07-30); alternation is a hard constraint, not a scored bonus, so there is no weight left to tune",
+}
+
 _WARNED_RETIRED_KEYS: set[str] = set()  # per-process dedup (final-review finding, corridor Phase 0)
 
 
@@ -602,6 +616,9 @@ def _warn_retired_keys(config: Dict[str, Any]) -> list[str]:
 
     artist_style = ds_pipeline.get("artist_style") or {}
     _warn_retired_section(artist_style, "artist_style", _RETIRED_ARTIST_STYLE_KEYS, found)
+
+    multi_artist = ds_pipeline.get("multi_artist") or {}
+    _warn_retired_section(multi_artist, "multi_artist", _RETIRED_MULTI_ARTIST_KEYS, found)
 
     return found
 
@@ -1338,7 +1355,16 @@ def handle_generate_playlist(cmd_data: Dict[str, Any]) -> None:
 
                 @property
                 def min_track_duration_seconds(self) -> int:
-                    return self.config.get('playlists', {}).get('min_track_duration_seconds', 90)
+                    # Was hardcoded to 90 (a stray copy of min_duration_minutes's
+                    # default just above -- a different key, playlist length in
+                    # minutes, not track length in seconds). Reconciled to the
+                    # single shared fallback (coordinator review 2026-07-30,
+                    # duration-gate-report.md) so this GUI-worker config shim
+                    # can't silently disagree with the CLI Config class or the
+                    # pier/bridge duration gates on a config missing the key.
+                    return self.config.get('playlists', {}).get(
+                        'min_track_duration_seconds', DEFAULT_MIN_TRACK_DURATION_SECONDS
+                    )
 
                 @property
                 def max_track_duration_seconds(self) -> int:
@@ -1480,10 +1506,11 @@ def handle_generate_playlist(cmd_data: Dict[str, Any]) -> None:
             emit_progress("generate", 60, 100, "Generating playlist")
             emit_log("INFO", f"Running playlist generation with cohesion_mode={cohesion_mode}")
 
-            if mode == "artist" and artist:
-                # Single artist mode
+            _artists = list(getattr(request, "artists", []) or [])
+            if mode == "artist" and (artist or _artists):
+                # Single artist mode, or multi-artist blend when 2+ chips are set
                 playlist_data = generator.create_playlist_for_artist(
-                    artist,
+                    artist or _artists[0],
                     track_count,
                     track_title=track_title,
                     track_titles=seed_tracks,
@@ -1494,6 +1521,7 @@ def handle_generate_playlist(cmd_data: Dict[str, Any]) -> None:
                     popular_seeds_mode=request.popular_seeds_mode,
                     popularity_mode=request.popularity_mode,
                     seed_epoch=request.seed_epoch,
+                    artist_names=_artists,
                 )
             elif mode == "seeds" and seed_tracks:
                 # Seeds mode (Phase 2 UI)
