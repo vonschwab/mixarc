@@ -779,14 +779,25 @@ def select_multi_artist_piers(
             )
             _piers_word = "pier" if want == 1 else "piers"
             _tracks_word = "track" if len(g.indices) == 1 else "tracks"
+            # A user with a real 5-track catalog whose 5 tracks are all
+            # sub-minimum fragments does not "have too few tracks" -- they
+            # have too few ELIGIBLE tracks. cluster_artist_tracks tags the
+            # exception (not a string match) when the duration gate is what
+            # actually emptied the group, so this copy doesn't misreport a
+            # scarcity the artist doesn't have (coordinator review
+            # 2026-07-30).
+            if getattr(exc, "duration_gate_starved", False):
+                _reason = (
+                    f"only {len(g.indices)} {_tracks_word} in your library, all "
+                    "under the minimum track length -- too few eligible to cluster"
+                )
+            else:
+                _reason = f"only {len(g.indices)} {_tracks_word} in your library — too few to cluster"
             relaxations.append({
                 "type": "relaxation",
                 "scope": "multi_artist",
                 "bridge": g.label,
-                "relaxed": [
-                    f"{want} {_piers_word} (only {len(g.indices)} {_tracks_word} "
-                    f"in your library — too few to cluster)"
-                ],
+                "relaxed": [f"{want} {_piers_word} ({_reason})"],
                 "severity": "info",
             })
             continue

@@ -12,6 +12,7 @@ import sys
 sys.path.insert(0, "tests")
 from support.gui_fidelity import resolved_artifact_path  # noqa: E402
 
+from src.config_loader import DEFAULT_MIN_TRACK_DURATION_SECONDS  # noqa: E402
 from src.features.artifacts import load_artifact_bundle  # noqa: E402
 from src.playlist.artist_style import (  # noqa: E402
     ArtistStyleConfig,
@@ -57,6 +58,9 @@ def test_skew_raises_pier_affinity(bundle):
         medoid_top_k=10,                 # over-produce, mirrors the steering path
         steering_target=target,
         metadata_db_path=DB,
+        # Explicit, not relied-on-default (coordinator review 2026-07-30):
+        # the real config value, same one production callers pass.
+        min_pier_duration_seconds=DEFAULT_MIN_TRACK_DURATION_SECONDS,
     )
     xgd = np.asarray(bundle.X_genre_dense, dtype=float)
     tgt = np.asarray(target, dtype=float)

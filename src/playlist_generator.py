@@ -10,7 +10,7 @@ import os
 import math
 import numpy as np
 from .string_utils import normalize_artist_key
-from src.config_loader import resolve_database_path
+from src.config_loader import DEFAULT_MIN_TRACK_DURATION_SECONDS, resolve_database_path
 from src.features.artifacts import load_artifact_bundle
 from src.playlist.ds_pipeline_runner import DsRunResult, generate_playlist_ds as run_ds_pipeline
 from src.playlist.artist_style import (
@@ -361,7 +361,9 @@ class PlaylistGenerator:
         if metadata is None:
             return set()
 
-        min_seconds = self.config.get("playlists", "min_track_duration_seconds", default=47)
+        min_seconds = self.config.get(
+            "playlists", "min_track_duration_seconds", default=DEFAULT_MIN_TRACK_DURATION_SECONDS
+        )
         min_ms = int(min_seconds * 1000)
         max_ms = 0
         cutoff_multiplier = float(
@@ -2177,7 +2179,10 @@ class PlaylistGenerator:
                 # single-artist and multi-artist calls below route through),
                 # so a future caller cannot bypass it by forgetting a pre-filter.
                 _min_pier_duration_seconds = int(
-                    self.config.get("playlists", "min_track_duration_seconds", default=46)
+                    self.config.get(
+                        "playlists", "min_track_duration_seconds",
+                        default=DEFAULT_MIN_TRACK_DURATION_SECONDS,
+                    )
                 )
                 _ma_piers = None
                 _multi_artist_relaxations: List[Dict[str, Any]] = []
@@ -3076,7 +3081,9 @@ class PlaylistGenerator:
         # seeds-mode seed, which keeps its duration exemption), so they must obey
         # the same duration window the bridge pool enforces below — otherwise an
         # outlier like a 77:42 DJ mix can seat as an anchor pier.
-        _min_dur = int(self.config.get("playlists", "min_track_duration_seconds", default=46))
+        _min_dur = int(self.config.get(
+            "playlists", "min_track_duration_seconds", default=DEFAULT_MIN_TRACK_DURATION_SECONDS
+        ))
         _max_dur = int(self.config.get("playlists", "max_track_duration_seconds", default=720))
         member_indices, _dur_removed = genre_mode.filter_member_indices_by_duration(
             member_indices, bundle.durations_ms,
@@ -3579,7 +3586,10 @@ class PlaylistGenerator:
         # paths were already closed. Same config key those two paths read;
         # no new knob.
         _min_pier_duration_seconds = int(
-            self.config.get("playlists", "min_track_duration_seconds", default=46)
+            self.config.get(
+                "playlists", "min_track_duration_seconds",
+                default=DEFAULT_MIN_TRACK_DURATION_SECONDS,
+            )
         )
 
         # Pre-order recency exclusions (applied via DS `excluded_track_ids`).

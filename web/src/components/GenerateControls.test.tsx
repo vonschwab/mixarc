@@ -287,6 +287,65 @@ describe("GenerateControls multi-artist blend", () => {
     expect(autocompleteMock.mock.calls.some(([q]) => q === "Buddy")).toBe(true);
   });
 
+  it("removing the active chip itself closes its dropdown and clears the active chip", async () => {
+    const autocompleteMock = vi.spyOn(api, "autocomplete").mockImplementation(async (q: string) => ({
+      items: q ? [`${q} Result`] : [],
+      has_more: false,
+    }));
+    renderControls({ mode: "artist" });
+
+    fireEvent.change(screen.getByPlaceholderText("Artist name…"), { target: { value: "Brian Eno" } });
+    fireEvent.click(screen.getByRole("button", { name: /add artist/i })); // chip 0
+    fireEvent.click(screen.getByRole("button", { name: /add artist/i })); // chip 1
+    const chip0 = screen.getByPlaceholderText(/second artist/i) as HTMLInputElement;
+
+    // Focus chip 0 and open its dropdown — it is the active chip when removed below.
+    fireEvent.focus(chip0);
+    fireEvent.change(chip0, { target: { value: "Budd" } });
+    await screen.findByText("Budd Result");
+
+    // Remove chip 0 — the chip that was active. removeChip's `prev === i` branch
+    // must reset the search and null out activeChip, not leave a stale open
+    // dropdown pointing at a now-removed (or wrongly re-indexed) chip.
+    fireEvent.click(screen.getByRole("button", { name: /remove artist 2/i }));
+
+    expect(screen.queryByText("Budd Result")).toBeNull();
+    const remaining = screen.getAllByPlaceholderText(/second artist|another artist/i) as HTMLInputElement[];
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0].value).toBe(""); // the surviving (former chip 1) was never touched
+    expect(autocompleteMock).toHaveBeenCalled();
+  });
+
+  it("removing a chip after the active one leaves the active chip's dropdown untouched", async () => {
+    vi.spyOn(api, "autocomplete").mockImplementation(async (q: string) => ({
+      items: q ? [`${q} Result`] : [],
+      has_more: false,
+    }));
+    renderControls({ mode: "artist" });
+
+    fireEvent.change(screen.getByPlaceholderText("Artist name…"), { target: { value: "Brian Eno" } });
+    fireEvent.click(screen.getByRole("button", { name: /add artist/i })); // chip 0
+    fireEvent.click(screen.getByRole("button", { name: /add artist/i })); // chip 1
+    const chip0 = screen.getByPlaceholderText(/second artist/i) as HTMLInputElement;
+
+    // Focus chip 0 (the EARLIER chip) and open its dropdown.
+    fireEvent.focus(chip0);
+    fireEvent.change(chip0, { target: { value: "Budd" } });
+    await screen.findByText("Budd Result");
+
+    // Remove chip 1 — AFTER the active chip. removeChip's re-targeting
+    // (`prev > i ? prev - 1 : prev`) must leave activeChip (0) unchanged since
+    // 0 is not greater than the removed index (1); chip 0's own dropdown and
+    // in-progress search must be completely unaffected.
+    fireEvent.click(screen.getByRole("button", { name: /remove artist 3/i }));
+
+    expect(screen.queryByText("Budd Result")).not.toBeNull();
+    expect(chip0.value).toBe("Budd");
+
+    fireEvent.change(chip0, { target: { value: "Buddy" } });
+    await screen.findByText("Buddy Result");
+  });
+
   it("clears extra artist chips when leaving artist mode", () => {
     const { rerender } = renderControls({ mode: "artist" });
     fireEvent.click(screen.getByRole("button", { name: /add artist/i }));

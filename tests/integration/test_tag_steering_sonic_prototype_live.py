@@ -8,6 +8,7 @@ import pytest
 sys.path.insert(0, "tests")
 from support.gui_fidelity import resolved_artifact_path  # noqa: E402
 
+from src.config_loader import DEFAULT_MIN_TRACK_DURATION_SECONDS  # noqa: E402
 from src.features.artifacts import load_artifact_bundle  # noqa: E402
 from src.playlist.artist_style import ArtistStyleConfig, cluster_artist_tracks  # noqa: E402
 from src.playlist.candidate_pool import build_candidate_pool  # noqa: E402
@@ -63,13 +64,19 @@ def test_sonic_prototype_raises_ambient_pier_affinity(bundle):
     aff_vec = _sonic_tag_affinity(bundle, tags)
     cfg = ArtistStyleConfig(enabled=True, medoid_tag_weight=0.3)
 
+    # min_pier_duration_seconds passed explicitly (not relied-on-default,
+    # coordinator review 2026-07-30): the real config value, same one
+    # production callers pass, identically on both calls so the comparison
+    # below stays apples-to-apples.
     _, med_base, _, _, _ = cluster_artist_tracks(
         bundle=bundle, artist_name="Brian Eno", cfg=cfg, random_seed=0,
-        medoid_top_k=10, steering_target=target, metadata_db_path=DB)
+        medoid_top_k=10, steering_target=target, metadata_db_path=DB,
+        min_pier_duration_seconds=DEFAULT_MIN_TRACK_DURATION_SECONDS)
     _, med_sonic, _, _, _ = cluster_artist_tracks(
         bundle=bundle, artist_name="Brian Eno", cfg=cfg, random_seed=0,
         medoid_top_k=10, steering_target=target, metadata_db_path=DB,
-        sonic_tag_affinity=aff_vec, sonic_tag_weight=0.5)
+        sonic_tag_affinity=aff_vec, sonic_tag_weight=0.5,
+        min_pier_duration_seconds=DEFAULT_MIN_TRACK_DURATION_SECONDS)
 
     base_sonic = float(np.mean([aff_vec[m] for m in med_base])) if med_base else 0.0
     with_sonic = float(np.mean([aff_vec[m] for m in med_sonic])) if med_sonic else 0.0
@@ -139,11 +146,13 @@ def test_no_sonic_affinity_is_byte_identical_piers(bundle):
     cfg = ArtistStyleConfig(enabled=True, medoid_tag_weight=0.3)
     _, med_a, _, _, _ = cluster_artist_tracks(
         bundle=bundle, artist_name="Brian Eno", cfg=cfg, random_seed=0,
-        medoid_top_k=10, steering_target=target, metadata_db_path=DB)
+        medoid_top_k=10, steering_target=target, metadata_db_path=DB,
+        min_pier_duration_seconds=DEFAULT_MIN_TRACK_DURATION_SECONDS)
     _, med_b, _, _, _ = cluster_artist_tracks(
         bundle=bundle, artist_name="Brian Eno", cfg=cfg, random_seed=0,
         medoid_top_k=10, steering_target=target, metadata_db_path=DB,
-        sonic_tag_affinity=None, sonic_tag_weight=0.5)
+        sonic_tag_affinity=None, sonic_tag_weight=0.5,
+        min_pier_duration_seconds=DEFAULT_MIN_TRACK_DURATION_SECONDS)
     assert med_a == med_b
 
 

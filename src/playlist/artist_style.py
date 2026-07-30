@@ -9,6 +9,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from src.string_utils import normalize_artist_key
+from src.config_loader import DEFAULT_MIN_TRACK_DURATION_SECONDS
 from src.playlist.history_analyzer import is_collaboration_of
 from src.playlist.candidate_pool import _compute_genre_similarity
 from src.playlist.genre_compatibility import compute_raw_genre_compatibility
@@ -838,7 +839,7 @@ def cluster_artist_tracks(
     bridgeability_eligible_mask: Optional[np.ndarray] = None,
     overlap_affinity: Optional[np.ndarray] = None,
     overlap_weight: float = 0.0,
-    min_pier_duration_seconds: Optional[int] = 46,
+    min_pier_duration_seconds: Optional[int] = DEFAULT_MIN_TRACK_DURATION_SECONDS,
 ) -> Tuple[List[List[int]], List[int], List[List[int]], np.ndarray, Dict[int, float]]:
     """Cluster artist tracks in sonic space and return clusters + medoids.
 
@@ -862,18 +863,25 @@ def cluster_artist_tracks(
     ``genre_mode.filter_member_indices_by_duration`` (unknown/zero duration
     means "unknown", not "invalid", and is kept).
 
-    The default is ``46`` -- the same fallback every other reader of
-    ``playlists.min_track_duration_seconds`` in this codebase uses when the key
-    is absent -- not ``None``. A coordinator review (2026-07-30) found a third,
+    The default is ``config_loader.DEFAULT_MIN_TRACK_DURATION_SECONDS`` (46) --
+    not ``None``. This constant is the SINGLE source every reader of
+    ``playlists.min_track_duration_seconds``'s absent-key fallback uses
+    (``config_loader.Config.min_track_duration_seconds``, the bridge-side gate
+    in ``_build_duration_exclusions_for_ds``, genre mode, history mode, this
+    parameter, and ``select_multi_artist_piers``'s own default) -- before it
+    existed these had quietly drifted to three different literals (47/46/90)
+    despite the shipped config always pinning the key to 46 (coordinator review
+    2026-07-30; see ``duration-gate-report.md`` for the drift and which files'
+    effective defaults changed). A coordinator review also found a third,
     pre-existing call site (history mode) that had been missed by the initial
     fix specifically because the parameter defaulted to inert; a real, safe
     floor as the default means a *future* fifth call site that forgets this
     parameter entirely is still gated, rather than silently reopening the exact
-    bug this parameter exists to close. Every current caller still passes the
-    live config value explicitly (never relies on this literal), so the
-    default only matters as a safety net, and it can never relax a caller's
-    own tighter/looser explicit choice. ``None`` remains available as an
-    explicit, intentional opt-out (see
+    bug this parameter exists to close. Every current caller -- production and
+    test -- now passes this value explicitly rather than relying on the
+    literal, so the default only matters as a safety net, and it can never
+    relax a caller's own tighter/looser explicit choice. ``None`` remains
+    available as an explicit, intentional opt-out (see
     ``test_min_pier_duration_seconds_explicit_none_disables_the_gate``) --
     nothing in this codebase currently needs it, but the capability is not
     removed.
@@ -989,10 +997,18 @@ def cluster_artist_tracks(
                 artist_name, len(artist_indices), _min_required,
                 _duration_gate_removed, int(min_pier_duration_seconds or 0),
             )
-        raise ValueError(
+        _too_few_exc = ValueError(
             f"Not enough tracks to cluster for artist {artist_name} "
             f"({len(artist_indices)} eligible, need >= {_min_required})"
         )
+        # Tagged (not string-matched) so a caller with its own thin-artist
+        # relaxation copy -- e.g. select_multi_artist_piers's per-group
+        # except-ValueError -- can tell "genuinely too few tracks" apart from
+        # "the duration gate removed everything" and say so accurately to the
+        # user, instead of reporting a scarcity the artist doesn't actually
+        # have (coordinator review 2026-07-30).
+        _too_few_exc.duration_gate_starved = bool(_duration_gate_removed)
+        raise _too_few_exc
 
     # Support-aware pier demotion (Task 3): within-artist-catalog neighborhood
     # density, computed once over the full (post-filter) candidate pool so it's

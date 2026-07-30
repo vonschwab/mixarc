@@ -53,7 +53,7 @@ from src.playlist.analyze_library_results import (
     parse_analyze_library_report,
     parse_analyze_library_stage_progress,
 )
-from src.config_loader import resolve_database_path
+from src.config_loader import DEFAULT_MIN_TRACK_DURATION_SECONDS, resolve_database_path
 from src.playlist.config import resolve_cohesion_mode
 from src.playlist.request_models import GeneratePlaylistRequest, LibraryPipelineRequest
 from .utils.redaction import redact_text
@@ -1338,7 +1338,16 @@ def handle_generate_playlist(cmd_data: Dict[str, Any]) -> None:
 
                 @property
                 def min_track_duration_seconds(self) -> int:
-                    return self.config.get('playlists', {}).get('min_track_duration_seconds', 90)
+                    # Was hardcoded to 90 (a stray copy of min_duration_minutes's
+                    # default just above -- a different key, playlist length in
+                    # minutes, not track length in seconds). Reconciled to the
+                    # single shared fallback (coordinator review 2026-07-30,
+                    # duration-gate-report.md) so this GUI-worker config shim
+                    # can't silently disagree with the CLI Config class or the
+                    # pier/bridge duration gates on a config missing the key.
+                    return self.config.get('playlists', {}).get(
+                        'min_track_duration_seconds', DEFAULT_MIN_TRACK_DURATION_SECONDS
+                    )
 
                 @property
                 def max_track_duration_seconds(self) -> int:
