@@ -362,6 +362,99 @@ def _slot_proximity(z: np.ndarray, target: float, span_width: float) -> np.ndarr
     return prox
 
 
+def _apply_min_duration_gate(
+    indices: List[int],
+    bundle,
+    min_pier_duration_seconds: Optional[int],
+    *,
+    artist_label: str,
+    quiet: bool = False,
+) -> Tuple[List[int], int]:
+    """Hard floor on pier candidacy: drop any index under
+    ``min_pier_duration_seconds``. Returns ``(kept_indices, removed_count)``.
+
+    Extracted from ``cluster_artist_tracks`` (was inline there) so a caller
+    that needs to know the POST-filter candidate count before calling it --
+    see ``_post_filter_eligible_count`` -- can never compute a different
+    answer than clustering itself will (xhigh review Finding 9: a caller
+    predicting k from a pre-filter count while cluster_artist_tracks selects
+    k from the post-filter count silently diverges). ``quiet=True`` suppresses
+    the log line for a prediction-only pass that isn't the real clustering
+    run (avoids double-logging the same removal on every group).
+    """
+    if min_pier_duration_seconds is None or getattr(bundle, "durations_ms", None) is None:
+        return list(indices), 0
+    before = len(indices)
+    min_ms = float(min_pier_duration_seconds) * 1000.0
+    durations = bundle.durations_ms
+    kept: List[int] = []
+    for idx in indices:
+        try:
+            d = float(durations[idx])
+        except (IndexError, TypeError, ValueError):
+            kept.append(idx)  # unknown duration -- keep, never invalid
+            continue
+        # <= 0 means "unknown", not "invalid" (mirrors
+        # genre_mode.filter_member_indices_by_duration) -- missing
+        # metadata must never silently shrink the pier pool.
+        if d <= 0.0 or d >= min_ms:
+            kept.append(idx)
+    removed = before - len(kept)
+    if removed and not quiet:
+        logger.info(
+            "Pier duration gate: %s removed %d/%d sub-minimum track(s) "
+            "(<%ds) from pier candidacy -- hard floor, prevents "
+            "interludes/outtakes/skits from seating as a pier",
+            artist_label, removed, before, int(min_pier_duration_seconds),
+        )
+    return kept, removed
+
+
+def _post_filter_eligible_count(
+    bundle,
+    member_indices: Sequence[int],
+    cfg: "ArtistStyleConfig",
+    *,
+    min_pier_duration_seconds: Optional[int] = DEFAULT_MIN_TRACK_DURATION_SECONDS,
+    metadata_db_path: Optional[str] = None,
+) -> int:
+    """The eligible-candidate count ``cluster_artist_tracks`` will actually
+    cluster over for this exact member set, after the same duration gate +
+    version-dedupe filters it applies internally, BEFORE it picks k via
+    ``_select_k`` (xhigh review Finding 9).
+
+    A caller that needs to predict cluster_artist_tracks's own k ahead of
+    calling it -- see ``select_multi_artist_piers``'s ``medoid_top_k`` sizing
+    -- must predict from this same post-filter count, never the raw member
+    set size, or the two silently diverge (this is the second time that exact
+    divergence has been fixed; restructuring so both sites share one
+    filtering implementation is what prevents a third). Delegates to the
+    exact helpers cluster_artist_tracks itself calls
+    (``_apply_min_duration_gate`` / ``_dedupe_artist_indices``) so this can
+    never drift out of step with what clustering will actually see. Quiet by
+    construction -- this is a prediction-only pass, not the real run.
+
+    Deliberately does not replicate ``restrict_to_track_ids`` or
+    ``excluded_track_ids`` filtering: no current caller of this helper passes
+    either to the matching ``cluster_artist_tracks`` call it predicts for.
+    """
+    indices = [int(i) for i in member_indices]
+    indices, _ = _apply_min_duration_gate(
+        indices, bundle, min_pier_duration_seconds,
+        artist_label="(k-prediction)", quiet=True,
+    )
+    if cfg.dedupe_versions:
+        albums_by_index = (
+            _load_albums_for_indices(bundle, indices, metadata_db_path)
+            if metadata_db_path else None
+        )
+        indices = _dedupe_artist_indices(
+            indices, getattr(bundle, "track_titles", None), bundle.durations_ms,
+            albums_by_index,
+        )
+    return len(indices)
+
+
 def _load_albums_for_indices(bundle, indices: List[int], db_path: str) -> Dict[int, str]:
     """track index -> album name for the given bundle indices, from metadata.db.
 
@@ -933,33 +1026,13 @@ def cluster_artist_tracks(
                 "Artist style seed freshness: removed %d recent artist tracks before clustering",
                 removed,
             )
-    _duration_gate_removed = 0
-    if min_pier_duration_seconds is not None and getattr(bundle, "durations_ms", None) is not None:
-        before = len(artist_indices)
-        min_ms = float(min_pier_duration_seconds) * 1000.0
-        durations = bundle.durations_ms
-        kept: List[int] = []
-        for idx in artist_indices:
-            try:
-                d = float(durations[idx])
-            except (IndexError, TypeError, ValueError):
-                kept.append(idx)  # unknown duration -- keep, never invalid
-                continue
-            # <= 0 means "unknown", not "invalid" (mirrors
-            # genre_mode.filter_member_indices_by_duration) -- missing
-            # metadata must never silently shrink the pier pool.
-            if d <= 0.0 or d >= min_ms:
-                kept.append(idx)
-        artist_indices = kept
-        _duration_gate_removed = before - len(artist_indices)
-        if _duration_gate_removed:
-            logger.info(
-                "Pier duration gate: %s removed %d/%d sub-minimum track(s) "
-                "(<%ds) from pier candidacy -- hard floor, prevents "
-                "interludes/outtakes/skits from seating as a pier",
-                artist_name, _duration_gate_removed, before,
-                int(min_pier_duration_seconds),
-            )
+    # Extracted to _apply_min_duration_gate (xhigh review Finding 9) so a
+    # caller predicting cluster_artist_tracks's own k ahead of time (see
+    # _post_filter_eligible_count) filters through the exact same code path
+    # and can never compute a different post-filter count than this does.
+    artist_indices, _duration_gate_removed = _apply_min_duration_gate(
+        artist_indices, bundle, min_pier_duration_seconds, artist_label=artist_name,
+    )
     if restrict_to_track_ids is not None:
         before = len(artist_indices)
         keep = {str(tid) for tid in restrict_to_track_ids}

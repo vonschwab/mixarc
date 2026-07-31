@@ -362,17 +362,42 @@ def total_pier_budget(
 
 
 def allocate_pier_budget(
-    groups: Sequence[ArtistGroup], total: int, *, joint_pier_min_budget: int
+    groups: Sequence[ArtistGroup], total: int, *, joint_pier_min_budget: int,
+    joint_min_cluster_size: int = 3,
 ) -> Dict[str, int]:
     """Split ``total`` piers across groups: even, remainder to the first chip.
 
     The joint group claims a GUARANTEED MINIMUM of one seat when it is
-    non-empty and the total reaches ``joint_pier_min_budget``. It may
-    additionally absorb surplus during redistribution once the exclusive
-    groups are saturated, subject to its own track capacity like any other
-    group -- the joint group IS the overlap between the named artists, so for
-    a pairing whose collaborative output dominates thin solo catalogs, it is
-    the correct place for spare budget to land, not a one-seat ceiling.
+    non-empty, the total reaches ``joint_pier_min_budget``, AND it has at
+    least ``joint_min_cluster_size`` tracks of its own (xhigh review Finding
+    8: without this last check, a joint group of e.g. one shared
+    collaboration track -- a common shape, two artists whose only overlap is
+    a single feature -- claimed a guaranteed seat it could never fill,
+    since ``cluster_artist_tracks`` needs ``max(3, cluster_k_min)`` tracks to
+    cluster at all; the reserved seat then raised ValueError, was caught, and
+    the shortfall misreported as the NAMED artists being thin rather than the
+    joint group being uncastable). ``joint_min_cluster_size`` should be passed
+    as ``max(3, style_cfg.cluster_k_min)`` -- the same floor
+    ``cluster_artist_tracks`` applies -- so this can never diverge from what
+    clustering will actually accept; the default of 3 matches
+    ``ArtistStyleConfig.cluster_k_min``'s own default for callers (tests)
+    that construct a budget without a live style config.
+
+    A joint group below this floor is not blocked from piers entirely: it may
+    still absorb SURPLUS during redistribution below if the exclusive groups
+    saturate first (rare in practice, since a joint group too thin to cluster
+    is almost always too thin to be worth surplus either) -- redistribution
+    doesn't gate on the cluster floor because it is capped by the group's own
+    track capacity already, and a group that ends up with a `want` it still
+    can't cluster is reported by the caller's existing per-group
+    except-ValueError path exactly like any other thin group.
+
+    It may additionally absorb surplus during redistribution once the
+    exclusive groups are saturated, subject to its own track capacity like
+    any other group -- the joint group IS the overlap between the named
+    artists, so for a pairing whose collaborative output dominates thin solo
+    catalogs, it is the correct place for spare budget to land, not a
+    one-seat ceiling.
 
     No group is ever allocated more piers than it has tracks. A shortfall
     against ``total`` after full redistribution reflects a genuine capacity
@@ -388,12 +413,24 @@ def allocate_pier_budget(
     remaining = total
 
     joint = next((g for g in groups if g.is_joint), None)
-    if joint is not None and joint.indices and total >= int(joint_pier_min_budget):
+    if (
+        joint is not None
+        and joint.indices
+        and len(joint.indices) >= int(joint_min_cluster_size)
+        and total >= int(joint_pier_min_budget)
+    ):
         alloc[joint.label] = 1
         remaining -= 1
         logger.info(
             "Multi-artist: reserved 1 pier for the jointly-credited group '%s'",
             joint.label,
+        )
+    elif joint is not None and joint.indices and len(joint.indices) < int(joint_min_cluster_size):
+        logger.info(
+            "Multi-artist: joint group '%s' has only %d track(s), below the "
+            "clustering floor (%d) -- no guaranteed pier reserved for it (it "
+            "cannot cluster regardless of how many piers it were given).",
+            joint.label, len(joint.indices), int(joint_min_cluster_size),
         )
 
     exclusive = [g for g in groups if not g.is_joint and g.indices]
@@ -991,6 +1028,16 @@ class MultiArtistPiers:
     # {} so existing call sites that construct MultiArtistPiers without it
     # keep working.
     support_by_index: Dict[int, float] = field(default_factory=dict)
+    # The number of groups (from ``groups``) that actually seated >=1 pier --
+    # NOT len(groups), which also counts groups that survived partition but
+    # failed to cluster (review Finding 6: playlist_generator.py scales the
+    # post-order per-artist cap by "the number of surviving groups", and
+    # using the raw group count over-relaxes the cap by counting a group that
+    # contributed nothing). ``None`` (the default, for callers/tests that
+    # hand-build a MultiArtistPiers without this) tells the caller to fall
+    # back to ``len(groups)`` -- the pre-fix behavior -- rather than silently
+    # treating "not provided" as zero.
+    seated_group_count: Optional[int] = None
 
 
 def _blocked_artist_keys(groups: Sequence[ArtistGroup]) -> frozenset:
@@ -1137,7 +1184,9 @@ def select_multi_artist_piers(
     """
     import math
 
-    from src.playlist.artist_style import cluster_artist_tracks, order_clusters, _select_k
+    from src.playlist.artist_style import (
+        cluster_artist_tracks, order_clusters, _select_k, _post_filter_eligible_count,
+    )
 
     names = [str(a).strip() for a in artist_names if str(a).strip()]
     if len(names) > ma_cfg.max_artists:
@@ -1235,6 +1284,11 @@ def select_multi_artist_piers(
     total = total_pier_budget(track_count, max_artist_fraction, len(groups))
     alloc = allocate_pier_budget(
         groups, total, joint_pier_min_budget=ma_cfg.joint_pier_min_budget,
+        # Review Finding 8: the reservation floor must match the floor
+        # cluster_artist_tracks will actually apply to this same joint group,
+        # or the guaranteed seat can be reserved for a group that can never
+        # cluster.
+        joint_min_cluster_size=max(3, int(style_cfg.cluster_k_min)),
     )
     logger.info(
         "Multi-artist pier budget: total=%d allocation=%s (track_count=%d, "
@@ -1261,6 +1315,35 @@ def select_multi_artist_piers(
     for g in groups:
         want = int(alloc.get(g.label, 0))
         if want <= 0:
+            # Review Finding 3: allocate_pier_budget can legitimately hand a
+            # surviving group zero seats (the joint group below its own
+            # min-budget threshold; an exclusive group starved out by a tiny
+            # total split across many chips) -- this is a real degradation of
+            # what the user asked for, not a no-op, and must be reported like
+            # every other per-group shortfall in this function (never-fail-
+            # on-soft-axes: degradation must always be observable).
+            if g.is_joint and total < int(ma_cfg.joint_pier_min_budget):
+                _zero_reason = (
+                    f"the joint pier reservation needs a total pier budget "
+                    f"of {ma_cfg.joint_pier_min_budget}, but this blend's "
+                    f"total is only {total}"
+                )
+            else:
+                _zero_reason = (
+                    f"the {total}-pier budget split across {len(groups)} "
+                    "group(s) left no seat for this one"
+                )
+            logger.warning(
+                "Multi-artist: '%s' was allocated 0 of %d total pier(s) (%s) "
+                "-- contributes no piers.", g.label, total, _zero_reason,
+            )
+            relaxations.append({
+                "type": "relaxation",
+                "scope": "multi_artist",
+                "bridge": g.label,
+                "relaxed": [f"every pier ({_zero_reason})"],
+                "severity": "info",
+            })
             continue
         # A group thinner than the clustering floor (cluster_k_min, e.g. a joint
         # group with only 1-2 tracks) cannot be clustered -- cluster_artist_tracks
@@ -1291,7 +1374,27 @@ def select_multi_artist_piers(
         # ceiling directly here over-produces medoid_top_k, which then makes
         # cluster_artist_tracks return MORE medoids than `want` while this
         # function reports a false "dropped N piers" scarcity.
-        k_predict = max(1, _select_k(len(g.indices), style_cfg))
+        #
+        # Review Finding 9: predict from the POST-filter count, not
+        # len(g.indices) (pre-filter, raw partition size). cluster_artist_
+        # tracks itself calls _select_k(len(artist_indices), cfg) AFTER its
+        # own duration gate + version-dedupe have already shrunk the group --
+        # predicting from the larger pre-filter count under-predicts k_predict
+        # is fine, but the resulting medoid_top_k = ceil(want / k_predict) is
+        # computed against a k that will turn out too LOW once the real
+        # (smaller) k is selected, so eff_top_k*k_real medoids can fall short
+        # of `want` with nothing to compensate. _post_filter_eligible_count
+        # shares the exact filtering helpers cluster_artist_tracks uses
+        # internally, so this can never diverge from the real value again
+        # (this is the second time this exact divergence has been fixed).
+        k_predict = max(1, _select_k(
+            _post_filter_eligible_count(
+                bundle, g.indices, style_cfg,
+                min_pier_duration_seconds=min_pier_duration_seconds,
+                metadata_db_path=metadata_db_path,
+            ),
+            style_cfg,
+        ))
         try:
             clusters, medoids, _by_cluster, X_norm, _support = cluster_artist_tracks(
                 bundle=bundle,
@@ -1327,8 +1430,27 @@ def select_multi_artist_piers(
                     f"only {len(g.indices)} {_tracks_word} in your library, all "
                     "under the minimum track length -- too few eligible to cluster"
                 )
-            else:
+            elif hasattr(exc, "duration_gate_starved"):
+                # Same raise site as above (too-few-tracks), just not
+                # duration-gate-caused -- a real scarcity claim.
                 _reason = f"only {len(g.indices)} {_tracks_word} in your library — too few to cluster"
+            else:
+                # Review Finding 10: cluster_artist_tracks has a SECOND raise
+                # site with no track-count relationship at all -- every
+                # k-means retry produced fewer than 2 non-empty clusters
+                # ("Clustering degenerate for artist ... after retries").
+                # Only the too-few-tracks raise sets `duration_gate_starved`
+                # (True or False); its absence here means this exception came
+                # from the degenerate-clustering site instead, so blaming
+                # library size is self-contradicting -- this can fire on a
+                # well-stocked artist whose sonic content just clusters
+                # poorly at this k. cluster_artist_tracks's own WARNING names
+                # the retries; this notice just avoids telling the user to
+                # add music they already own.
+                _reason = (
+                    "clustering could not find distinct groups within its "
+                    "tracks -- not a shortage of tracks"
+                )
             relaxations.append({
                 "type": "relaxation",
                 "scope": "multi_artist",
@@ -1357,14 +1479,30 @@ def select_multi_artist_piers(
             # "N of M piers" is a ratio phrase -- "piers" stays plural even
             # when the numerator (dropped count) is 1, same as "1 of 3 items"
             # reads naturally where "1 of 3 item" would not.
+            #
+            # Review Finding 10: this branch runs whenever cluster_artist_
+            # tracks returned fewer medoids than `want` -- which can happen
+            # even when the group has PLENTY of tracks, if the pier
+            # bridgeability veto thinned a cluster to zero eligible medoids
+            # (cluster_artist_tracks's own WARNING: "after veto+reallocation
+            # only N medoid(s) available") or k-means clustering degenerated
+            # to fewer non-empty clusters than requested. Blaming "only N
+            # tracks in your library" unconditionally is self-contradicting
+            # on a 250-track artist -- only make that claim when the group's
+            # raw track count is actually below what was requested; otherwise
+            # say honestly that something other than scarcity thinned it.
+            if len(g.indices) < want:
+                _reason = f"only {len(g.indices)} {_tracks_word} in your library"
+            else:
+                _reason = (
+                    "clustering/bridgeability reduced the eligible "
+                    "candidates, not a shortage of tracks"
+                )
             relaxations.append({
                 "type": "relaxation",
                 "scope": "multi_artist",
                 "bridge": g.label,
-                "relaxed": [
-                    f"{_short} of {want} piers (only {len(g.indices)} "
-                    f"{_tracks_word} in your library)"
-                ],
+                "relaxed": [f"{_short} of {want} piers ({_reason})"],
                 "severity": "info",
             })
 
@@ -1455,7 +1593,15 @@ def select_multi_artist_piers(
             "middle.", bridge_label, mean_affinity,
         )
 
-    blocked = _blocked_artist_keys(groups)
+    # Review Finding 2: a group that seated NO pier (caught above by the
+    # per-group except-ValueError, or skipped entirely by the want<=0 branch)
+    # must not be blocked from bridge interiors -- it contributes no
+    # structure, so blocking it too is excluding that chip's tracks TWICE
+    # (no piers AND no fill). ``group_of_index``'s values are exactly the
+    # labels of groups that placed >=1 medoid into ``all_medoids`` above.
+    _seated_labels = set(group_of_index.values())
+    _seated_groups = [g for g in groups if g.label in _seated_labels]
+    blocked = _blocked_artist_keys(_seated_groups)
     assert all(isinstance(k, str) for k in blocked), (
         "blocked_artist_keys must contain only artist-key strings"
     )
@@ -1472,4 +1618,5 @@ def select_multi_artist_piers(
         mean_affinity=mean_affinity,
         blocked_artist_keys=blocked,
         support_by_index=support_by_index,
+        seated_group_count=len(_seated_groups),
     )

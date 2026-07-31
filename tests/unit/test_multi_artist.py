@@ -370,14 +370,37 @@ def test_allocation_is_even_with_remainder_to_the_first_chip():
 
 
 def test_joint_group_claims_one_seat_when_budget_allows():
+    # Joint has 3 tracks -- clears the default cluster floor (Finding 8:
+    # max(3, cluster_k_min)) so the guaranteed-seat path in this test is
+    # actually exercised, not masked by the floor gate added below.
+    groups = [
+        ArtistGroup("A", [0, 1, 2]),
+        ArtistGroup("B", [3, 4, 5]),
+        ArtistGroup("A & B", [6, 7, 8], is_joint=True, source_artists=("A", "B")),
+    ]
+    alloc = allocate_pier_budget(groups, 5, joint_pier_min_budget=3)
+    assert alloc["A & B"] == 1
+    assert alloc["A"] + alloc["B"] == 4
+    assert sum(alloc.values()) == 5
+
+
+def test_joint_group_below_cluster_floor_gets_no_guaranteed_seat():
+    """Finding 8: a joint group below the clustering floor (max(3,
+    cluster_k_min), default 3) must not claim the guaranteed seat even when
+    the total pier budget clears joint_pier_min_budget -- it can never
+    actually cluster with that few tracks (cluster_artist_tracks itself
+    needs >= 3), so reserving a seat for it wastes a pier the exclusive
+    groups could have used and yields nothing in return. Same inputs as
+    test_joint_group_claims_one_seat_when_budget_allows above, except the
+    joint group has 2 tracks instead of 3."""
     groups = [
         ArtistGroup("A", [0, 1, 2]),
         ArtistGroup("B", [3, 4, 5]),
         ArtistGroup("A & B", [6, 7], is_joint=True, source_artists=("A", "B")),
     ]
     alloc = allocate_pier_budget(groups, 5, joint_pier_min_budget=3)
-    assert alloc["A & B"] == 1
-    assert alloc["A"] + alloc["B"] == 4
+    assert alloc.get("A & B", 0) == 0
+    assert alloc["A"] + alloc["B"] == 5
     assert sum(alloc.values()) == 5
 
 
@@ -440,11 +463,12 @@ def test_shortfall_against_total_capacity_is_seated_fully_and_warned(caplog):
 def test_joint_group_guaranteed_seat_survives_when_no_surplus_is_needed():
     """Confirms the guaranteed-one-seat behavior (Part A's floor, unchanged)
     still holds in the ordinary case where the exclusive groups can absorb
-    the rest without any redistribution."""
+    the rest without any redistribution. Joint has 3 tracks -- clears the
+    Finding 8 cluster-floor gate."""
     groups = [
         ArtistGroup("A", [0, 1, 2, 3]),
         ArtistGroup("B", [4, 5, 6, 7]),
-        ArtistGroup("A & B", [8, 9], is_joint=True, source_artists=("A", "B")),
+        ArtistGroup("A & B", [8, 9, 10], is_joint=True, source_artists=("A", "B")),
     ]
     alloc = allocate_pier_budget(groups, 6, joint_pier_min_budget=3)
     assert alloc["A & B"] == 1
@@ -839,10 +863,17 @@ def test_orchestrator_seats_both_artists_and_the_joint_group():
 def test_orchestrator_reports_the_thin_joint_group_by_name():
     """Coordinator review Finding 3: the 2-track 'A and B' joint group in
     _blend_bundle is below cluster_k_min=3 in EVERY orchestrator test above,
-    so the except-ValueError branch added to keep a thin group from crashing
-    the whole blend fires on every single run -- but nothing asserted on its
-    output. Pin the relaxation it must produce: naming the joint group and
-    explaining why it contributed no piers."""
+    so it contributes no piers on every single run -- but nothing asserted on
+    its output. Pin the relaxation it must produce: naming the joint group
+    and explaining why it contributed no piers.
+
+    xhigh review Finding 8 (2026-07-30): allocate_pier_budget now checks the
+    SAME clustering floor before reserving the joint group's guaranteed seat,
+    so this 2-track joint group never even reaches the except-ValueError
+    "too few to cluster" path any more -- it is correctly recognized as
+    unclusterable up front and allocated 0 piers (Finding 3's own relaxation
+    path), a better outcome (no wasted reservation) with different, equally
+    honest wording."""
     b = _blend_bundle()
     out = select_multi_artist_piers(
         bundle=b, artist_names=["A", "B"],
@@ -851,7 +882,7 @@ def test_orchestrator_reports_the_thin_joint_group_by_name():
     )
     thin = [r for r in out.relaxations if r.get("bridge") == "A & B"]
     assert thin, f"expected a relaxation naming the joint group, got {out.relaxations}"
-    assert any("too few to cluster" in s for s in thin[0]["relaxed"])
+    assert any("every pier" in s for s in thin[0]["relaxed"])
 
 
 def test_orchestrator_raises_with_relaxations_when_every_group_fails_to_cluster():
@@ -1210,3 +1241,202 @@ def test_group_medoids_are_sonic_sequenced_before_capping():
         f"survive the cap, got {a_piers} -- raw-cluster-order slicing would wrongly "
         f"keep {{0, 1}}"
     )
+
+
+# ── xhigh review 2026-07-30 (docs/superpowers/sdd/xhigh-review-fixes) ──────
+
+
+def _joint_only_thin_bundle():
+    """B has an exclusive catalog (5 tracks); A is credited ONLY jointly with
+    B, and that joint credit is just 2 tracks -- below the clustering floor,
+    so the joint group ALWAYS fails to cluster. A has no other representation
+    at all: its only appearance in ``groups`` is this failing joint group."""
+    artists = ["B"] * 5 + ["A and B"] * 2
+    sonic = [
+        [0.0, 1.0], [0.05, 0.95], [0.1, 0.9], [0.15, 0.85], [0.6, 0.5],   # B
+        [1.0, 0.0], [0.95, 0.05],                                          # joint (A and B), 2 tracks
+    ]
+    b = _sonic_bundle(artists, sonic)
+    b.durations_ms = np.full(len(artists), 240000, dtype=float)
+    return b
+
+
+def test_group_that_seats_no_pier_is_not_blocked_from_interiors():
+    """Finding 2: blocked_artist_keys must be derived from groups that
+    actually SEATED a pier, not every partition-surviving group. A is
+    credited ONLY via the joint group here, and that joint group (2 tracks)
+    is below the clustering floor and seats nothing -- A must not be blocked
+    from bridge interiors (blocking without seating excludes it TWICE: no
+    piers AND no fill). B, which DOES seat piers, stays blocked."""
+    from src.string_utils import normalize_artist_key
+
+    b = _joint_only_thin_bundle()
+    out = select_multi_artist_piers(
+        bundle=b, artist_names=["A", "B"],
+        style_cfg=ArtistStyleConfig(enabled=True, pier_bridgeability_enabled=False),
+        ma_cfg=MultiArtistConfig(), track_count=15, max_artist_fraction=0.125,
+    )
+    assert isinstance(out, MultiArtistPiers)
+    joint = next(g for g in out.groups if g.is_joint)
+    assert all(m not in out.ordered_medoids for m in joint.indices), (
+        "fixture assumption changed -- the joint group must fail to seat "
+        "(2 tracks, below the floor) for this test to be meaningful"
+    )
+    assert normalize_artist_key("A") not in out.blocked_artist_keys, (
+        "A seated NO pier (its only representation, the joint group, never "
+        "seated) -- it must not be blocked from bridge interiors"
+    )
+    assert normalize_artist_key("B") in out.blocked_artist_keys, (
+        "B DID seat piers and must stay blocked"
+    )
+
+
+def test_zero_allocation_group_is_reported_not_silently_skipped():
+    """Finding 3: allocate_pier_budget can legitimately hand a surviving
+    group zero piers (here: the joint group's own 5-track catalog clears the
+    Finding-8 cluster floor, but the total budget is too small to reach
+    joint_pier_min_budget) -- this is a real degradation of what the user
+    asked for and must be reported, never silently skipped."""
+    b = _joint_only_bundle()
+    out = select_multi_artist_piers(
+        bundle=b, artist_names=["A", "B"],
+        style_cfg=ArtistStyleConfig(enabled=True, pier_bridgeability_enabled=False),
+        ma_cfg=MultiArtistConfig(joint_pier_min_budget=3),
+        track_count=10, max_artist_fraction=0.3,
+    )
+    assert isinstance(out, MultiArtistPiers)
+    zero_alloc = [r for r in out.relaxations if r.get("bridge") == "A & B"]
+    assert zero_alloc, f"expected a relaxation for the zero-allocation joint group, got {out.relaxations}"
+    assert any("every pier" in s for s in zero_alloc[0]["relaxed"]), zero_alloc
+    # Sanity: B, which got the entire (small) budget, still seats piers.
+    b_group = next(g for g in out.groups if g.label == "B")
+    assert any(m in b_group.indices for m in out.ordered_medoids)
+
+
+def test_medoid_top_k_predicted_from_post_filter_count_not_pre_filter():
+    """Finding 9: k_predict must come from the SAME post-filter count
+    cluster_artist_tracks itself selects k from (duration gate already
+    applied), never the raw pre-filter group size. A 30-track raw group with
+    10 sub-minimum-duration tracks removed lands at 20 eligible -- pre-filter
+    bucket (30, <60) predicts k=4; post-filter bucket (20, <25) predicts k=3.
+    Mocks cluster_artist_tracks purely to CAPTURE the medoid_top_k it's
+    called with for group A (falls through to the real function for B), so
+    this doesn't depend on k-means clustering geometry at all."""
+    import unittest.mock as mock
+
+    import src.playlist.artist_style as art_mod
+
+    a_sonic = [[1.0, 0.0]] * 30  # content irrelevant -- A's own call is stubbed out
+    b_sonic = [[0.0, 1.0], [0.05, 0.95], [0.1, 0.9], [0.15, 0.85], [0.6, 0.5]]
+    b = _sonic_bundle(["A"] * 30 + ["B"] * 5, a_sonic + b_sonic)
+    durations = np.full(35, 240_000.0)
+    durations[:10] = 20_000.0  # 10 of A's 30 raw tracks are sub-minimum (<46s)
+    b.durations_ms = durations
+
+    real_cluster_artist_tracks = art_mod.cluster_artist_tracks
+    captured: dict = {}
+
+    def fake_cluster_artist_tracks(*, artist_name, **kwargs):
+        if artist_name == "A":
+            captured.update(kwargs)
+            raise ValueError("Not enough tracks to cluster for artist A (stubbed)")
+        return real_cluster_artist_tracks(artist_name=artist_name, **kwargs)
+
+    with mock.patch.object(art_mod, "cluster_artist_tracks", side_effect=fake_cluster_artist_tracks):
+        out = select_multi_artist_piers(
+            bundle=b, artist_names=["A", "B"],
+            style_cfg=ArtistStyleConfig(enabled=True, pier_bridgeability_enabled=False),
+            ma_cfg=MultiArtistConfig(), track_count=39, max_artist_fraction=0.125,
+            min_pier_duration_seconds=46,
+        )
+    assert isinstance(out, MultiArtistPiers), "B alone must still seat piers"
+    # want_A = 4 (total_pier_budget(39, 0.125, 2) = 7; divmod(7, 2) = (3, 1),
+    # first chip gets the remainder -> A=4, B=3). Correct post-filter
+    # medoid_top_k = ceil(4 / 3) = 2; the pre-fix bug predicted from the raw
+    # 30-track bucket (k=4) -> ceil(4 / 4) = 1.
+    assert captured.get("medoid_top_k") == 2, (
+        f"k_predict must use the post-filter (20-track) count, not the raw "
+        f"(30-track) one -- got medoid_top_k={captured.get('medoid_top_k')}"
+    )
+
+
+def test_relaxation_distinguishes_degenerate_clustering_from_scarcity():
+    """Finding 10: cluster_artist_tracks has a raise site with nothing to do
+    with track count (every k-means retry producing <2 non-empty clusters,
+    "Clustering degenerate for artist ... after retries") -- unlike the
+    too-few-tracks raise, it never sets ``duration_gate_starved``. The
+    relaxation copy must not blame library size for this cause."""
+    import unittest.mock as mock
+
+    import src.playlist.artist_style as art_mod
+
+    b = _blend_bundle()  # A has 5 real tracks
+    real_cluster_artist_tracks = art_mod.cluster_artist_tracks
+
+    def fake_cluster_artist_tracks(*, artist_name, **kwargs):
+        if artist_name == "A":
+            raise ValueError("Clustering degenerate for artist A after retries")
+        return real_cluster_artist_tracks(artist_name=artist_name, **kwargs)
+
+    with mock.patch.object(art_mod, "cluster_artist_tracks", side_effect=fake_cluster_artist_tracks):
+        out = select_multi_artist_piers(
+            bundle=b, artist_names=["A", "B"],
+            style_cfg=ArtistStyleConfig(enabled=True, pier_bridgeability_enabled=False),
+            ma_cfg=MultiArtistConfig(), track_count=30, max_artist_fraction=0.125,
+        )
+    assert isinstance(out, MultiArtistPiers)
+    a_relax = [r for r in out.relaxations if r.get("bridge") == "A"]
+    assert a_relax, f"expected a relaxation for A's degenerate clustering, got {out.relaxations}"
+    text = " ".join(a_relax[0]["relaxed"])
+    assert "tracks in your library" not in text, (
+        f"degenerate clustering has nothing to do with library size: {text}"
+    )
+    assert "not a shortage of tracks" in text
+
+
+def test_relaxation_distinguishes_thin_cluster_shortfall_from_scarcity():
+    """Finding 10: the OTHER relaxation site (a group clustered successfully
+    but produced fewer medoids than requested) blamed "only N tracks in your
+    library" unconditionally -- self-contradicting when the group has plenty
+    of tracks and something else (an unevenly-sized cluster, the
+    bridgeability veto) thinned it. Stubs cluster_artist_tracks to return
+    fewer medoids than requested for a 20-track group, isolating the wording
+    from needing real clustering geometry."""
+    import unittest.mock as mock
+
+    import src.playlist.artist_style as art_mod
+
+    a_sonic = [[1.0, 0.0]] * 20
+    b_sonic = [[0.0, 1.0], [0.05, 0.95], [0.1, 0.9], [0.15, 0.85], [0.6, 0.5]]
+    b = _sonic_bundle(["A"] * 20 + ["B"] * 5, a_sonic + b_sonic)
+    b.durations_ms = np.full(25, 240_000.0)
+    X_norm_a = np.asarray(a_sonic) / np.linalg.norm(a_sonic, axis=1, keepdims=True)
+
+    real_cluster_artist_tracks = art_mod.cluster_artist_tracks
+
+    def fake_cluster_artist_tracks(*, artist_name, target_pier_count, **kwargs):
+        if artist_name == "A":
+            # A has 20 real tracks but the stub returns only 2 medoids --
+            # simulates an uneven-cluster/bridgeability-style under-produce
+            # that has nothing to do with track count.
+            medoids = [0, 1]
+            return [medoids], medoids, [medoids], X_norm_a, {i: 1.0 for i in medoids}
+        return real_cluster_artist_tracks(
+            artist_name=artist_name, target_pier_count=target_pier_count, **kwargs
+        )
+
+    with mock.patch.object(art_mod, "cluster_artist_tracks", side_effect=fake_cluster_artist_tracks):
+        out = select_multi_artist_piers(
+            bundle=b, artist_names=["A", "B"],
+            style_cfg=ArtistStyleConfig(enabled=True, pier_bridgeability_enabled=False),
+            ma_cfg=MultiArtistConfig(), track_count=56, max_artist_fraction=0.125,
+        )
+    assert isinstance(out, MultiArtistPiers)
+    a_relax = [r for r in out.relaxations if r.get("bridge") == "A"]
+    assert a_relax, f"expected a shortfall relaxation for A, got {out.relaxations}"
+    text = " ".join(a_relax[0]["relaxed"])
+    assert "in your library" not in text, (
+        f"A has 20 real tracks, comfortably more than requested -- must not "
+        f"blame library size: {text}"
+    )
+    assert "not a shortage of tracks" in text
