@@ -577,21 +577,37 @@ def generate_playlist_ds(
             logger.warning("energy load failed; pace energy terms disabled", exc_info=True)
             energy_matrix = None
 
+    # Post-order per-artist cap override for the multi-artist blend's own
+    # named/seed/joint artists (xhigh review Finding 6). The relaxed cap used
+    # to be applied by scaling cfg.construct.max_artist_fraction_final itself
+    # -- but that value feeds the SINGLE `max_per_artist` scalar passed to
+    # find_artist_cap_violations below, which applies it to EVERY identity in
+    # the playlist, not just the ones the relaxation was meant for. A 3-group
+    # 30-track blend raised the cap from 4 to 12 for every identity, so any
+    # incidental bridge-fill artist could take up to 12 of 30 slots without
+    # tripping this hard diversity guard. Computed here (not by mutating cfg)
+    # so `max_per_artist` below stays the UNSCALED cap for everyone else;
+    # only `seed_artist_keys_override`'s own keys get the relaxed value, via
+    # `max_tracks_per_artist_overrides` at the validation call.
+    artist_cap_overrides: Optional[Dict[str, int]] = None
     if single_artist:
         # Disable artist cap for single-artist runs
         cfg = replace(cfg, construct=replace(cfg.construct, max_artist_fraction_final=1.0))
-    elif multi_artist_group_count > 1:
-        # Multi-artist blend: scale the per-artist cap by the number of
-        # surviving groups (see the parameter docstring above) -- same shape
-        # of adjustment as the single_artist branch, same place in the flow.
-        cfg = replace(
-            cfg,
-            construct=replace(
-                cfg.construct,
-                max_artist_fraction_final=(
-                    cfg.construct.max_artist_fraction_final * multi_artist_group_count
-                ),
+    elif multi_artist_group_count > 1 and seed_artist_keys_override:
+        _relaxed_cap = max(
+            1,
+            math.ceil(
+                float(playlist_len) * cfg.construct.max_artist_fraction_final
+                * multi_artist_group_count
             ),
+        )
+        artist_cap_overrides = {
+            str(k): _relaxed_cap for k in seed_artist_keys_override if k
+        }
+        logger.info(
+            "Multi-artist: per-artist cap override %d for %d named/seed/joint "
+            "artist key(s); every other identity stays on the unscaled cap.",
+            _relaxed_cap, len(artist_cap_overrides),
         )
     # Also apply any runtime overrides (for backward compatibility with nested structure)
     cfg = _apply_overrides(cfg, overrides)
@@ -1474,6 +1490,7 @@ def generate_playlist_ds(
         artist_identity_cfg=artist_identity_cfg,
         min_gap=int(getattr(cfg.construct, "min_gap", 1) or 1),
         max_tracks_per_artist=int(max_per_artist),
+        max_tracks_per_artist_overrides=artist_cap_overrides,
         # Pier ratio is RECORDED, not warned on: max_artist_fraction_final is a
         # per-artist cap, not a pier-ratio target, and mini-piers legitimately push
         # the count above the derived base. Pass a real band here once one has been

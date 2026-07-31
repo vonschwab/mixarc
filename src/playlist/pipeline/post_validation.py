@@ -180,26 +180,45 @@ def find_artist_gap_violations(
     return out
 
 
-def find_artist_cap_violations(identity_key_sets, max_per_artist: int) -> List[tuple]:
-    """Identity keys appearing in more than ``max_per_artist`` tracks, as
+def find_artist_cap_violations(
+    identity_key_sets, max_per_artist: int, per_artist_overrides: Optional[Dict[str, int]] = None,
+) -> List[tuple]:
+    """Identity keys appearing in more than their cap's worth of tracks, as
     ``(key, count)`` ordered by count desc then key.
 
     Counts per PARTICIPANT: a collaboration counts toward every member's total,
     matching the beam's per-artist accounting. ``max_per_artist <= 0`` disables
-    the check.
+    the check for every key with no entry in ``per_artist_overrides``.
+
+    ``per_artist_overrides`` (default ``None``, every key uses ``max_per_artist``):
+    a key present here uses ITS OWN cap instead of the global ``max_per_artist``.
+    This is for the multi-artist blend (xhigh review Finding 6): a relaxed cap
+    is only correct for the NAMED/seed artists (each of whom legitimately
+    appears at every one of their own group's piers), never for an incidental
+    non-seed identity that happens to show up as bridge fill -- applying the
+    relaxed cap globally (the pre-fix behavior: scaling ``max_per_artist``
+    itself for the whole call) silently disabled this hard diversity
+    constraint for every OTHER artist in the playlist too. Every other caller
+    (GENRE/SEEDS/HISTORY modes, and ARTIST mode's own single-seed case) passes
+    ``None`` and is unaffected.
     """
     from collections import Counter
 
     cap = int(max_per_artist)
-    if cap <= 0:
+    overrides = {str(k): int(v) for k, v in (per_artist_overrides or {}).items()}
+    if cap <= 0 and not overrides:
         return []
     counts: Counter = Counter()
     for s in identity_key_sets:
         for key in set(s):
             if key:
                 counts[key] += 1
+
+    def _cap_for(key: str) -> int:
+        return overrides.get(key, cap)
+
     return sorted(
-        ((a, n) for a, n in counts.items() if n > cap),
+        ((a, n) for a, n in counts.items() if _cap_for(a) > 0 and n > _cap_for(a)),
         key=lambda t: (-t[1], t[0]),
     )
 
@@ -254,6 +273,7 @@ def run_post_order_validation(
     artist_identity_cfg: Any = None,
     min_gap: int = 0,
     max_tracks_per_artist: int = 0,
+    max_tracks_per_artist_overrides: Optional[Dict[str, int]] = None,
     pier_ratio_target: float = 0.0,
     pier_ratio_tolerance: float = 0.0,
 ) -> PostOrderValidation:
@@ -267,6 +287,11 @@ def run_post_order_validation(
       * Artist gap: same-identity tracks closer than ``min_gap``.
       * Per-artist cap: an identity appearing more than ``max_tracks_per_artist``
         times. Pass the beam's DERIVED cap, not the raw config literal.
+        ``max_tracks_per_artist_overrides`` (xhigh review Finding 6) lets
+        specific identity keys (the multi-artist blend's named/seed/joint
+        artists) use a relaxed cap of their own while every other identity
+        stays on the unscaled ``max_tracks_per_artist`` -- see
+        ``find_artist_cap_violations``.
       * Pier ratio: piers/total must stay within ``pier_ratio_tolerance`` of
         ``pier_ratio_target``.
 
@@ -332,7 +357,9 @@ def run_post_order_validation(
             warnings.append(msg)
             logger.warning("post_order_validation: %s", msg)
 
-    cap_violations = find_artist_cap_violations(identities, max_tracks_per_artist)
+    cap_violations = find_artist_cap_violations(
+        identities, max_tracks_per_artist, max_tracks_per_artist_overrides,
+    )
     for artist, count in cap_violations:
         msg = (
             f"artist_cap_violation: artist={artist} count={count} "

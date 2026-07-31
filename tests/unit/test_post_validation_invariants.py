@@ -155,3 +155,47 @@ def test_cap_orders_by_count_desc_then_key():
     assert find_artist_cap_violations(tracks, max_per_artist=4) == [
         ("c", 7), ("a", 6), ("b", 6),
     ]
+
+
+# ── xhigh review Finding 6: per-artist cap overrides (multi-artist blend) ──
+
+
+def test_per_artist_override_relaxes_only_the_named_key():
+    """A key present in per_artist_overrides uses ITS OWN cap; every other
+    key stays on the global max_per_artist -- the multi-artist blend's
+    relaxed cap must never apply to an incidental non-seed identity."""
+    tracks = [_s("eno")] * 12 + [_s("some_bridge_artist")] * 6
+    violations = find_artist_cap_violations(
+        tracks, max_per_artist=4, per_artist_overrides={"eno": 12},
+    )
+    # "eno" is exactly at its own relaxed cap (12) -> clean. The incidental
+    # bridge-fill artist at 6 > the UNSCALED cap (4) -> still a violation.
+    assert violations == [("some_bridge_artist", 6)]
+
+
+def test_per_artist_override_still_catches_a_breach_above_the_relaxed_cap():
+    tracks = [_s("eno")] * 15
+    violations = find_artist_cap_violations(
+        tracks, max_per_artist=4, per_artist_overrides={"eno": 12},
+    )
+    assert violations == [("eno", 15)]
+
+
+def test_no_overrides_is_byte_identical_to_the_plain_cap():
+    tracks = [_s("pablo")] * 5 + [_s("b")]
+    assert (
+        find_artist_cap_violations(tracks, max_per_artist=4, per_artist_overrides=None)
+        == find_artist_cap_violations(tracks, max_per_artist=4)
+        == [("pablo", 5)]
+    )
+
+
+def test_zero_global_cap_still_enforces_an_override():
+    """max_per_artist<=0 normally disables the whole check -- but a caller
+    that supplies overrides for specific keys (multi-artist blend with the
+    global cap otherwise off) must still enforce those."""
+    tracks = [_s("eno")] * 3 + [_s("other")] * 100
+    violations = find_artist_cap_violations(
+        tracks, max_per_artist=0, per_artist_overrides={"eno": 2},
+    )
+    assert violations == [("eno", 3)]
