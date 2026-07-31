@@ -154,6 +154,39 @@ ignore_errors = false
 check_untyped_defs = true
 warn_return_any = true
 
+
+# -- Pyright / Pylance -------------------------------------------------------
+# Mirrors the [tool.mypy] allowlist policy above: this codebase is too dense in
+# untyped legacy code for project-wide type checking to be useful, so BOTH
+# checkers are scoped to the same two modules. A module graduates into typing by
+# being added to `include` here AND to the mypy allowlist above -- keep the two
+# lists identical so the checkers never disagree about what is in scope.
+#
+# `basic` is the level that actually AGREES with mypy's settings here. Measured
+# 2026-07-30: mypy reports 0 issues on both allowlisted modules; pyright at
+# `basic` also reports 0; pyright at `strict` reports 21, all of them
+# generics-parameterization pedantry (`dict` vs `dict[str, Any]`) rather than
+# defects. `strict` would be a second, harsher standard on modules that already
+# have a checker -- not a mirror of the policy.
+#
+# Why this section exists: with no config at all the editor's Pyright ran
+# near-strict against opted-out code AND could not resolve `src.*` imports,
+# producing a long stream of diagnostics with no true positives in it. A checker
+# whose output is always noise trains you to ignore a checker. Verified after
+# this change: a whole-project run analyzes 2 files and reports 0 errors.
+[tool.pyright]
+pythonVersion = "3.11"
+# `src` is imported as `src.foo`; the editor's language server does not always
+# infer the project root the way the CLI does.
+extraPaths = ["."]
+typeCheckingMode = "basic"
+reportMissingImports = "none"
+# The mypy allowlist, and only it. Everything else is out of project scope.
+include = [
+    "src/cancellation.py",
+    "src/genre_cache.py",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
