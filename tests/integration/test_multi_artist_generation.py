@@ -317,6 +317,111 @@ def test_disabled_config_warns_loudly_and_generates_from_first_artist(caplog):
 
 
 # ---------------------------------------------------------------------------
+# xhigh review 2026-07-30 (docs/superpowers/sdd/xhigh-review-fixes)
+# ---------------------------------------------------------------------------
+
+
+@_requires_artifact
+def test_thin_primary_guard_holds_when_blend_branch_unreachable():
+    """Finding 4: the thin-primary bypass (Finding 3) must not apply when the
+    multi-artist branch will not actually run this call -- here, track_title
+    makes the big style/multi-artist gate skip entirely. Without the fix, a
+    1-track primary chip falls through past both early returns with nothing
+    to rescue it and crashes deep in seed derivation instead of returning
+    None cleanly (the pre-Finding-3 behavior for a genuinely thin artist)."""
+    generator = _artist_generator([])
+    fake_tracks = (
+        [{"rating_key": "primary-1", "artist": "Thin Chip For Finding Four", "title": "Only Song"}]
+        + [
+            {"rating_key": f"other-{i}", "artist": "Other Chip For Finding Four", "title": f"T{i}"}
+            for i in range(10)
+        ]
+    )
+    generator.library.get_all_tracks = lambda: fake_tracks
+    result = generator.create_playlist_for_artist(
+        artist_name="Thin Chip For Finding Four",
+        artist_names=["Thin Chip For Finding Four", "Other Chip For Finding Four"],
+        track_count=30, random_seed=0, track_title="Only Song",
+    )
+    assert result is None, (
+        "a thin (1-track) primary chip locked to a single seed track, with "
+        "the multi-artist branch unreachable (track_title set), must return "
+        "None -- not fall through to a crash deep in seed derivation"
+    )
+
+
+@_requires_artifact
+@pytest.mark.integration
+@pytest.mark.slow
+def test_absent_primary_chip_drops_and_proceeds_from_surviving_chip():
+    """Finding 5: a misspelled/absent PRIMARY chip must not hard-crash in
+    seed derivation (the "has no tracks after duration/title/freshness
+    exclusions" ValueError) -- it should be dropped with a relaxation and
+    generation should proceed from the surviving chip. "Radiohed" (a typo)
+    has zero tracks in the real library; David Bowie is real and well-
+    stocked with no joint credit with the misspelled name, so with only 2
+    chips requested, select_multi_artist_piers itself can only ever surface
+    <2 surviving groups here and falls back to single-artist -- the fix
+    under test is that the fallback targets Bowie, not the absent chip."""
+    generator = _artist_generator([])
+    result = generator.create_playlist_for_artist(
+        artist_name="Radiohed", artist_names=["Radiohed", BOWIE],
+        track_count=30, random_seed=0,
+    )
+    assert result is not None and result.get("tracks"), (
+        "an absent primary chip must not prevent generation from the "
+        "surviving, well-stocked chip"
+    )
+    artists = _artists_in(result)
+    assert any(BOWIE in a for a in artists), f"expected {BOWIE} tracks: {set(artists)}"
+    warnings = _playlist_warnings(result)
+    assert any(
+        "radiohed" in str(w).lower() for w in warnings
+    ), f"the dropped chip must be reported to the user: {warnings}"
+
+
+@_requires_artifact
+def test_recency_readmission_evaluated_per_chip_not_pooled(monkeypatch):
+    """Finding 7: seed_recency_exclusion_for_presence must be called once PER
+    CHIP with that chip's own indices, never once against a pooled id set
+    spanning every chip -- pooling let a well-stocked chip's fresh count mask
+    a thin chip's total starvation (repro: Eno 50 fresh + Budd 8-all-recent
+    pooled to fresh_count=50, so Budd's re-admission never triggered)."""
+    import src.playlist.seed_eligibility as se
+    from src.playlist.utils import safe_get_artist_key
+    from src.string_utils import normalize_artist_key
+
+    real_fn = se.seed_recency_exclusion_for_presence
+    calls = []
+
+    def _spy(artist_track_ids, recency_excluded_ids, target_piers, **kw):
+        calls.append(frozenset(str(t) for t in artist_track_ids))
+        return real_fn(artist_track_ids, recency_excluded_ids, target_piers, **kw)
+
+    monkeypatch.setattr(se, "seed_recency_exclusion_for_presence", _spy)
+
+    generator = _artist_generator([])
+    generator._get_local_history = lambda: [{"dummy": True}]
+    budd_key = normalize_artist_key(BUDD)
+    budd_ids = {
+        str(t.get("rating_key")) for t in generator.library.get_all_tracks()
+        if safe_get_artist_key(t) == budd_key
+    }
+    assert budd_ids, "fixture assumption changed -- Harold Budd must have real tracks"
+    generator._compute_excluded_from_history = lambda *a, **kw: set(budd_ids)
+    _capture_dispatch(generator)
+
+    with pytest.raises(_DispatchCaptured):
+        generator.create_playlist_for_artist(
+            artist_name=ENO, artist_names=[ENO, BUDD], track_count=30,
+            random_seed=0, exclude_seed_tracks_from_recency=True,
+        )
+
+    assert len(calls) == 2, f"expected one seed_recency_exclusion_for_presence call per chip, got {len(calls)}: {calls}"
+    assert calls[0] != calls[1], "each call must use that chip's OWN ids, never a pooled set"
+
+
+# ---------------------------------------------------------------------------
 # Task 13: live acceptance. No monkeypatching of select_multi_artist_piers --
 # these drive the real clustering/budget/ordering math against the real
 # artifact + DB, through create_playlist_for_artist exactly as the GUI would
@@ -619,8 +724,18 @@ def test_recency_readmission_scope_covers_every_chip():
     scope was built from artist_name (chip #1) alone -- chip #2..N's tracks
     were invisible to the re-admission calculation entirely, so a starved
     second chip's recently-played tracks could never be re-admitted no
-    matter how badly its group needed them. The scope passed in must cover
-    every requested chip, not just the primary."""
+    matter how badly its group needed them. Every requested chip must be
+    covered SOMEWHERE across the calls made for this run, not just the
+    primary.
+
+    xhigh review Finding 7 (2026-07-30): the caller now calls
+    seed_recency_exclusion_for_presence once PER CHIP (each chip's own
+    indices), not once against a POOLED set spanning every chip -- pooling
+    let a well-stocked chip's fresh count mask a thin chip's starvation. This
+    test now captures every call (a list) and checks the UNION covers both
+    chips, and that each chip got its own dedicated, chip-scoped call --
+    the original "covers every chip" intent, updated for the new per-chip
+    mechanism."""
     import src.playlist.seed_eligibility as seed_eligibility_mod
 
     bundle = load_artifact_bundle(str(ART), sonic_variant_override="muq")
@@ -637,11 +752,11 @@ def test_recency_readmission_scope_covers_every_chip():
     generator._get_local_history = lambda: [{"dummy": True}]
     generator._compute_excluded_from_history = lambda *a, **k: {next(iter(budd_ids))}
 
-    captured = {}
+    captured_scopes = []
     real_fn = seed_eligibility_mod.seed_recency_exclusion_for_presence
 
     def _spy(artist_track_ids, recency_excluded_ids, target_piers, **kwargs):
-        captured["artist_track_ids"] = set(str(t) for t in artist_track_ids)
+        captured_scopes.append(set(str(t) for t in artist_track_ids))
         return real_fn(artist_track_ids, recency_excluded_ids, target_piers, **kwargs)
 
     with patch(
@@ -652,13 +767,22 @@ def test_recency_readmission_scope_covers_every_chip():
             artist_name=ENO, artist_names=[ENO, BUDD], track_count=30,
             random_seed=0, exclude_seed_tracks_from_recency=True,
         )
-    scope = captured.get("artist_track_ids")
-    assert scope is not None, "seed_recency_exclusion_for_presence was never called"
-    assert scope & budd_ids, (
-        f"Harold Budd's tracks must be part of the recency re-admission scope, "
-        f"got scope of size {len(scope)}"
+    assert captured_scopes, "seed_recency_exclusion_for_presence was never called"
+    assert len(captured_scopes) == 2, (
+        f"expected one call per chip (Eno, Budd), got {len(captured_scopes)}"
     )
-    assert scope & eno_ids, "Brian Eno's tracks must still be part of the scope"
+    union_scope = set().union(*captured_scopes)
+    assert union_scope & budd_ids, (
+        f"Harold Budd's tracks must be part of the recency re-admission scope, "
+        f"got union scope of size {len(union_scope)}"
+    )
+    assert union_scope & eno_ids, "Brian Eno's tracks must still be part of the scope"
+    assert any(scope & eno_ids and not (scope & budd_ids) for scope in captured_scopes), (
+        "one call must be scoped to Eno's OWN tracks, not a pooled set"
+    )
+    assert any(scope & budd_ids and not (scope & eno_ids) for scope in captured_scopes), (
+        "one call must be scoped to Budd's OWN tracks, not a pooled set"
+    )
 
 
 @_requires_artifact

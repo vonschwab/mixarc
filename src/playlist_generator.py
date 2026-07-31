@@ -1561,6 +1561,76 @@ class PlaylistGenerator:
                 if safe_get_artist_key(t) in _combined_keys
             })
 
+        # Review Finding 5: a PRIMARY chip with zero library tracks (typo,
+        # or an artist genuinely absent from the library) passes the two
+        # thin-primary guards below whenever `_ma_combined_track_count` looks
+        # healthy, but the seed-derivation block further down (~200 lines,
+        # "Artist '{name}' has no tracks after duration/title/freshness
+        # exclusions") still works off THIS variable, `artist_tracks`
+        # (primary-only) -- and raises before the multi-artist branch ever
+        # gets a chance to build piers from the surviving chip(s). That raise
+        # is an internal-looking hard error, not the drop-the-chip-and-report
+        # path the blend was written to provide. select_multi_artist_piers's
+        # own MultiArtistBlendFailed handling already drops an empty chip and
+        # reports it via a relaxation -- but its single-artist FALLBACK always
+        # re-targets `artist_name`, so if `artist_name` itself is the empty
+        # chip, that fallback is generating from nothing. Swapping the local
+        # "effective primary" to the first OTHER named chip that actually has
+        # tracks fixes both: the seed-derivation block below no longer
+        # crashes on an empty list, and any eventual single-artist fallback
+        # targets a real artist. `_ma_names` (passed to
+        # select_multi_artist_piers further down) is untouched by this swap,
+        # so the ORIGINAL empty chip is still dropped and reported by that
+        # function's own relaxation plumbing exactly as designed -- this only
+        # changes who this function treats as "the artist" when there's
+        # nothing else to do with an empty primary.
+        if not artist_tracks and len(_early_ma_names) >= 2:
+            _dropped_primary_name = artist_name
+            for _candidate_name in _early_ma_names[1:]:
+                _candidate_key = normalize_artist_key(_candidate_name)
+                _candidate_tracks = [
+                    t for t in all_library_tracks
+                    if safe_get_artist_key(t) == _candidate_key
+                ]
+                if _candidate_tracks:
+                    logger.warning(
+                        "Multi-artist: primary chip '%s' has no tracks in your "
+                        "library -- proceeding from '%s' instead (review "
+                        "Finding 5); the blend itself still evaluates every "
+                        "requested chip, including '%s'.",
+                        _dropped_primary_name, _candidate_name, _dropped_primary_name,
+                    )
+                    artist_name = _candidate_name
+                    artist_key = _candidate_key
+                    artist_tracks = _candidate_tracks
+                    break
+
+        # Review Finding 4: the two thin-primary bypasses just below only make
+        # sense when the multi-artist branch (guarded further down by
+        # `style_cfg.enabled and artifact_path and (not artist_only) and (not
+        # track_title) and not fixed_seed_tracks`) will actually run --
+        # otherwise generation falls through to the legacy/single-artist path
+        # on a thin `artist_tracks` list with nothing to rescue it, exactly
+        # what those guards exist to prevent. `style_cfg`/`artifact_path`
+        # aren't built until much later, so re-derive the two cheap config
+        # reads here (side-effect-free; the real ones later read the same
+        # keys) rather than restructure the whole function's ordering.
+        # `fixed_seed_tracks` isn't computed yet either -- `anchor_seed_ids`
+        # truthiness is a conservative stand-in (fixed_seed_tracks can only
+        # ever be non-empty when anchor_seed_ids was given), so this can only
+        # under-bypass (fail closed to the pre-Finding-3 guard), never
+        # over-bypass into the exact bug Finding 4 describes.
+        _ma_ds_cfg_early = self.config.get("playlists", "ds_pipeline", default={}) or {}
+        _ma_blend_reachable = bool(
+            (_ma_ds_cfg_early.get("artist_style", {}) or {}).get("enabled", False)
+            and _ma_ds_cfg_early.get("artifact_path")
+            and not artist_only
+            and not track_title
+            and not anchor_seed_ids
+            and (_ma_ds_cfg_early.get("multi_artist", {}) or {}).get("enabled", True)
+            and len(_early_ma_names) >= 2
+        )
+
         # Mix in collaborations when explicitly requested, or as a fallback when
         # the artist has too few solo tracks to seed from.
         solo_count = len(artist_tracks)
@@ -1598,7 +1668,11 @@ class PlaylistGenerator:
                     len(artist_tracks), solo_count, len(collaboration_tracks),
                 )
             elif solo_count < 4:
-                if _ma_combined_track_count is not None and _ma_combined_track_count >= 4:
+                if (
+                    _ma_combined_track_count is not None
+                    and _ma_combined_track_count >= 4
+                    and _ma_blend_reachable
+                ):
                     logger.info(
                         "Multi-artist: primary chip '%s' has only %d solo track(s) and no "
                         "collaborations, but the pairing %s has %d combined -- continuing "
@@ -1615,7 +1689,11 @@ class PlaylistGenerator:
                 logger.info("No collaboration tracks found for %s; using solo tracks only", artist_name)
 
         if len(artist_tracks) < 4:
-            if _ma_combined_track_count is not None and _ma_combined_track_count >= 4:
+            if (
+                _ma_combined_track_count is not None
+                and _ma_combined_track_count >= 4
+                and _ma_blend_reachable
+            ):
                 logger.info(
                     "Multi-artist: primary chip '%s' has only %d track(s) (including "
                     "collaborations), but the pairing %s has %d combined -- continuing "
@@ -2132,29 +2210,46 @@ class PlaylistGenerator:
                     # `_early_ma_names` is empty, so the loop below runs once,
                     # over `artist_name`, same as the code it replaces.
                     _recency_scope_names = list(dict.fromkeys([artist_name] + _early_ma_names))
-                    _recency_scope_indices: List[int] = []
+                    # Review Finding 7: evaluate re-admission PER CHIP, not
+                    # against a pooled fresh count. seed_recency_exclusion_
+                    # for_presence's own fresh_count is computed over
+                    # whatever id set it is given -- pooling every chip's ids
+                    # into one set (the old `_artist_ids`) let a well-stocked
+                    # chip's fresh tracks mask a thin chip's total starvation:
+                    # Brian Eno (50 fresh) + Harold Budd (8, all played this
+                    # week) pooled to fresh_count=50, so the re-admission
+                    # early-returned and NONE of Budd's 8 were re-admitted,
+                    # starving Budd's group to zero. Looping per chip and
+                    # threading the progressively-relaxed set forward keeps
+                    # the shared low-level function's signature/behavior
+                    # completely unchanged (it is also used by the plain
+                    # single-artist caller) -- a single-artist request has
+                    # `_early_ma_names` empty, so this loop runs exactly once
+                    # over `artist_name` with the SAME inputs the old single
+                    # call used, byte-identical.
+                    _running_excluded = set(seed_recency_excluded_ids)
                     for _recency_name in _recency_scope_names:
-                        _recency_scope_indices.extend(_artist_indices_in_bundle(
-                            bundle, _recency_name, include_collaborations=include_collaborations))
-                    _recency_scope_indices = list(dict.fromkeys(_recency_scope_indices))
-                    _artist_ids = {
-                        str(bundle.track_ids[i]) for i in _recency_scope_indices
-                    }
-                    _rank = None
-                    if popularity_values is not None:
-                        _rank = [
-                            str(bundle.track_ids[i]) for i in sorted(
-                                _recency_scope_indices, key=lambda i: float(popularity_values[i]), reverse=True)
-                        ]
-                    _relaxed_excluded = seed_recency_exclusion_for_presence(
-                        _artist_ids, seed_recency_excluded_ids, target_pier_count,
-                        readmit_rank=_rank,
-                    ) or None
+                        _name_indices = list(dict.fromkeys(_artist_indices_in_bundle(
+                            bundle, _recency_name, include_collaborations=include_collaborations)))
+                        if not _name_indices:
+                            continue
+                        _name_ids = {str(bundle.track_ids[i]) for i in _name_indices}
+                        _name_rank = None
+                        if popularity_values is not None:
+                            _name_rank = [
+                                str(bundle.track_ids[i]) for i in sorted(
+                                    _name_indices, key=lambda i: float(popularity_values[i]), reverse=True)
+                            ]
+                        _running_excluded = seed_recency_exclusion_for_presence(
+                            _name_ids, _running_excluded, target_pier_count,
+                            readmit_rank=_name_rank,
+                        )
+                    _relaxed_excluded = _running_excluded or None
                     _readmitted = len(seed_recency_excluded_ids) - len(_relaxed_excluded or set())
                     if _readmitted:
                         logger.info(
                             "Seed presence: re-admitted %d recently-played track(s) across "
-                            "%s to fill target_piers=%d (fresh pool was short)",
+                            "%s (evaluated per chip) to fill target_piers=%d (fresh pool was short)",
                             _readmitted, _recency_scope_names, target_pier_count,
                         )
 
@@ -2318,7 +2413,20 @@ class PlaylistGenerator:
                     # surviving group, joint included) or a legitimate N-artist
                     # pier allocation self-reports as "degraded" on every
                     # successful blend (human ruling, task-10 review).
-                    _multi_artist_group_count = len(_ma_piers.groups)
+                    #
+                    # Review Finding 6: use the SEATED group count, not
+                    # len(_ma_piers.groups) -- the latter also counts a group
+                    # that survived partition but contributed zero piers
+                    # (thin-cluster failure, or allocate_pier_budget's own
+                    # want<=0 branch), over-relaxing the cap for a group that
+                    # placed no structure at all. Falls back to len(groups)
+                    # for a hand-built MultiArtistPiers (tests) that doesn't
+                    # set the field.
+                    _multi_artist_group_count = (
+                        _ma_piers.seated_group_count
+                        if _ma_piers.seated_group_count is not None
+                        else len(_ma_piers.groups)
+                    )
 
                     # Finding-1 fix (xhigh review): arc-aware terminal-avoidance
                     # is no longer a separate post-hoc reorder here. It used to
