@@ -26,6 +26,7 @@ from unittest.mock import patch
 
 import pytest
 
+import src.playlist.multi_artist as multi_artist_mod
 from src.features.artifacts import load_artifact_bundle
 from src.playlist.artist_style import _artist_indices_in_bundle
 from src.playlist.multi_artist import (
@@ -33,6 +34,7 @@ from src.playlist.multi_artist import (
     ArtistGroup,
     MultiArtistBlendFailed,
     MultiArtistPiers,
+    _alternation_count,
     _blocked_artist_keys,
 )
 from tests.integration.test_gui_fidelity_regressions import _artist_generator, _select_piers
@@ -45,6 +47,8 @@ ENO = "Brian Eno"
 BUDD = "Harold Budd"
 BOWIE = "David Bowie"
 FOXX = "John Foxx"
+VEGYN = "Vegyn"
+BMSR = "Black Moth Super Rainbow"
 
 # The pier IDs Brian Eno produced on master @ b4f9c89, before any multi-artist
 # code existed. Any later task that changes this list has broken the
@@ -710,33 +714,90 @@ def test_blend_failed_relaxations_survive_a_failing_fallback():
 
 
 @_requires_artifact
-def test_terminal_avoidance_applies_to_blend_piers():
-    """Review Finding 8: support_by_index / _terminal_avoidance_support were
-    computed only inside the single-artist tail, so a blend could seat a
-    sonic-outlier pier in the closing seat -- order_with_alternation (forced
-    alternation ladder + minimax sonic edge) has no notion of within-artist
-    support. Forces a MultiArtistPiers whose LAST pier looks catastrophically
-    low-support and everything else high-support, so
-    reorder_avoiding_low_support_terminal has an unambiguous reason to move
-    it off the terminal seat, and asserts the dispatched pier order changed.
-    """
-    fake_piers, ordered, bundle = _fake_multi_artist_piers()
-    assert len(ordered) >= 3, "need >= 3 piers for a non-trivial terminal seat"
-    fake_piers.support_by_index = {i: 1.0 for i in ordered}
-    fake_piers.support_by_index[ordered[-1]] = 0.0
+def test_dispatched_pier_order_matches_order_with_alternations_own_decision():
+    """Finding-1 fix (xhigh code review, docs/superpowers/sdd/xhigh-review-
+    fixes/finding-1-report.md): ``pier_support_terminal_avoidance`` used to
+    run reorder_avoiding_low_support_terminal as a SEPARATE post-hoc reorder
+    in create_playlist_for_artist, AFTER select_multi_artist_piers had
+    already forced the highest safe artist alternation via
+    order_with_alternation. That helper's own preference is a greedy
+    nearest-neighbour search -- the same heuristic that clumps same-artist
+    piers by construction, the precise reason the forced-interleaving
+    rewrite exists -- so it silently discarded the alternation just forced
+    (measured on the real library: Vegyn + Black Moth Super Rainbow went
+    from a forced 5/5 down to 2/5). The OLD ``test_terminal_avoidance_
+    applies_to_blend_piers`` this replaces only asserted the terminal pier
+    moved, on a hand-built ``MultiArtistPiers`` with ``select_multi_artist_
+    piers`` mocked out entirely -- it could never have caught this, because
+    it never exercised order_with_alternation's own decision at all.
 
-    generator = _artist_generator([])
-    _capture_dispatch(generator)
-    with patch("src.playlist.multi_artist.select_multi_artist_piers", return_value=fake_piers):
-        with pytest.raises(_DispatchCaptured) as excinfo:
-            generator.create_playlist_for_artist(
-                artist_name=ENO, artist_names=[ENO, BUDD], track_count=30, random_seed=0,
+    This test does the opposite: it runs the REAL, unmocked
+    ``select_multi_artist_piers`` (and therefore the real ``order_with_
+    alternation`` call inside it, with terminal-support now folded in --
+    see multi_artist.py) through the real production entry point,
+    ``create_playlist_for_artist``, for the exact pairing that reproduced the
+    bug plus the two others from the review's manual repro. It spies on
+    ``order_with_alternation`` to capture its own decision (the ordered pier
+    list and the alternation it achieved) and asserts the pier order actually
+    handed to the DS pipeline is BYTE-IDENTICAL to that decision -- nothing
+    between select_multi_artist_piers's return and the DS-pipeline handoff
+    may reorder the piers, which is exactly the class of bug a reintroduced
+    post-hoc reorder would be.
+    """
+    real_order_with_alternation = multi_artist_mod.order_with_alternation
+    captured: dict = {}
+
+    def _spy(*args, **kwargs):
+        result = real_order_with_alternation(*args, **kwargs)
+        captured["medoids"] = list(args[0])
+        captured["group_of_index"] = dict(args[2])
+        captured["result"] = result
+        return result
+
+    for names in ([VEGYN, BMSR], [ENO, BUDD], [ENO, BOWIE]):
+        captured.clear()
+        generator = _artist_generator([])
+        _capture_dispatch(generator)
+        with patch.object(multi_artist_mod, "order_with_alternation", side_effect=_spy):
+            with pytest.raises(_DispatchCaptured) as excinfo:
+                generator.create_playlist_for_artist(
+                    artist_name=names[0], artist_names=list(names),
+                    track_count=30, random_seed=0,
+                )
+        assert "result" in captured, (
+            f"{'+'.join(names)}: order_with_alternation was never called -- "
+            f"select_multi_artist_piers must have returned None/raised instead "
+            f"of a real blend; this test needs the real orchestrator to run"
+        )
+        decided_order, _improved, decided_alt, _max_alt = captured["result"]
+        group_of_index = captured["group_of_index"]
+
+        bundle = load_artifact_bundle(str(ART), sonic_variant_override="muq")
+        dispatched_indices = [
+            bundle.track_id_to_index[pid] for pid in excinfo.value.pier_ids
+        ]
+
+        assert dispatched_indices == decided_order, (
+            f"{'+'.join(names)}: order_with_alternation decided {decided_order} "
+            f"but the DS pipeline received {dispatched_indices} -- something "
+            f"reordered the piers AFTER order_with_alternation's decision (the "
+            f"exact defect finding-1 fixed: a post-hoc terminal-avoidance "
+            f"reorder silently discarded the forced interleaving)."
+        )
+        dispatched_alt = _alternation_count(dispatched_indices, group_of_index)
+        assert dispatched_alt == decided_alt, (
+            f"{'+'.join(names)}: the dispatched pier order's own alternation "
+            f"({dispatched_alt}) does not match what order_with_alternation "
+            f"decided ({decided_alt}) for the identical index list -- "
+            f"_alternation_count and order_with_alternation disagree, which "
+            f"should be structurally impossible"
+        )
+        if names == [VEGYN, BMSR]:
+            assert dispatched_alt >= 5, (
+                f"Vegyn + Black Moth Super Rainbow is the exact reproduction "
+                f"of the finding-1 defect (previously forced 5/5, silently "
+                f"degraded to 2/5 by the post-hoc reorder) -- got {dispatched_alt}/5"
             )
-    starved_id = str(bundle.track_ids[ordered[-1]])
-    assert excinfo.value.pier_ids[-1] != starved_id, (
-        f"the artificially-starved-support pier {starved_id} should have been "
-        f"moved off the terminal seat, got order {excinfo.value.pier_ids}"
-    )
 
 
 @_requires_artifact

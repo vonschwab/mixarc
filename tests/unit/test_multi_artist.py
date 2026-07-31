@@ -667,6 +667,109 @@ def test_ordering_is_a_permutation_and_handles_degenerate_input():
     assert single == [1] and improved is False and achieved_alt == 0 and max_alt == 0
 
 
+# ---------------------------------------------------------------------------
+# Finding-1 fix (xhigh code review, docs/superpowers/sdd/xhigh-review-fixes/
+# finding-1-report.md): pier_support_terminal_avoidance used to run as a
+# SEPARATE post-hoc reorder_avoiding_low_support_terminal call in
+# playlist_generator.py, AFTER order_with_alternation had already forced the
+# highest safe artist alternation. That helper's own preference is a greedy
+# nearest-neighbour search over the pier set -- the same heuristic
+# order_clusters uses, which clumps same-artist piers by construction (the
+# precise reason the forced-interleaving rewrite above exists) -- so it
+# silently discarded the alternation just forced (measured: Vegyn + Black
+# Moth Super Rainbow went from a forced 5/5 down to 2/5 on the real library).
+# Fixed by folding the SAME preference into order_with_alternation's own
+# per-level search, as a tie-break applied AFTER the minimax worst-edge
+# criterion and BEFORE the sonic-cost tie-break, so it can change which tied
+# order wins a level but never which level -- or which worst edge -- wins.
+# ---------------------------------------------------------------------------
+
+
+def test_terminal_avoidance_prefers_orders_that_avoid_the_lowest_support_pier():
+    """Square geometry (see ``_square_geometry``): full alternation (alt=3)
+    has 8 tied orders at worst edge -1.0. Among those, the pre-existing
+    sonic-cost tie-break alone prefers a subset that INCLUDES orders seating
+    B0 (index 2, given the lowest support here) at a terminal seat -- e.g.
+    (A0, B1, A1, B0) has the same top cost (-1) as (A1, B0, A0, B1), which
+    avoids B0 entirely. Folding in the terminal-support preference must pick
+    one of the latter, without changing achieved alternation or worst edge.
+    """
+    X, group_of = _square_geometry()
+    support = {0: 1.0, 1: 1.0, 2: 0.0, 3: 1.0}  # index 2 (B0) is the outlier
+    ordered, _improved, achieved_alt, max_alt = order_with_alternation(
+        [0, 1, 2, 3], X, group_of, pier_adjacency_floor=-2.0, support_by_index=support,
+    )
+    assert achieved_alt == 3 == max_alt, (
+        "the terminal-support preference must never cost alternation"
+    )
+    chosen_min = min(float(np.dot(X[a], X[b])) for a, b in zip(ordered, ordered[1:]))
+    assert chosen_min == pytest.approx(-1.0), (
+        "the terminal-support preference must never cost worst edge"
+    )
+    assert ordered[0] != 2 and ordered[-1] != 2, (
+        f"the lowest-support pier (index 2) landed at a terminal seat even "
+        f"though a same-alternation-level order avoiding it exists: {ordered}"
+    )
+
+
+def test_terminal_avoidance_is_a_noop_without_a_support_signal():
+    """``support_by_index=None`` (the default -- no support computed, or
+    ``pier_support_terminal_avoidance`` off) must reproduce the exact
+    pre-finding-1 output: same order, same achieved alternation."""
+    X, group_of = _square_geometry()
+    with_none = order_with_alternation(
+        [0, 1, 2, 3], X, group_of, pier_adjacency_floor=-2.0, support_by_index=None,
+    )
+    without_kwarg = order_with_alternation(
+        [0, 1, 2, 3], X, group_of, pier_adjacency_floor=-2.0,
+    )
+    assert with_none == without_kwarg
+
+
+def test_terminal_avoidance_never_costs_alternation_or_worst_edge():
+    """Property test (mirrors ``test_floor_never_leaves_a_rescuable_level_
+    unreached``'s random-trial style): across random geometries and random
+    support signals, adding a terminal-support preference must never change
+    the achieved alternation or the chosen worst edge that the very same call
+    without a support signal would have produced -- only WHICH tied order (if
+    any) is picked."""
+    rng = np.random.default_rng(2026)
+    trials = 200
+    for _ in range(trials):
+        n = int(rng.integers(4, 7))
+        dim = int(rng.integers(2, 6))
+        X = rng.normal(size=(n, dim))
+        X = X / np.linalg.norm(X, axis=1, keepdims=True)
+        idx = list(range(n))
+        labels = rng.choice(["A", "B"], size=n)
+        group_of = {i: str(labels[i]) for i in idx}
+        support = {i: float(rng.random()) for i in idx}
+
+        baseline_ordered, _bi, baseline_alt, baseline_max = order_with_alternation(
+            idx, X, group_of,
+        )
+        baseline_min = min(
+            float(np.dot(X[a], X[b])) for a, b in zip(baseline_ordered, baseline_ordered[1:])
+        )
+
+        supported_ordered, _si, supported_alt, supported_max = order_with_alternation(
+            idx, X, group_of, support_by_index=support,
+        )
+        supported_min = min(
+            float(np.dot(X[a], X[b])) for a, b in zip(supported_ordered, supported_ordered[1:])
+        )
+
+        assert supported_max == baseline_max
+        assert supported_alt == baseline_alt, (
+            f"terminal-support preference changed achieved alternation: "
+            f"{baseline_alt} -> {supported_alt} (n={n}, group_of={group_of})"
+        )
+        assert supported_min == pytest.approx(baseline_min), (
+            f"terminal-support preference changed worst edge: "
+            f"{baseline_min:.4f} -> {supported_min:.4f} (n={n}, group_of={group_of})"
+        )
+
+
 def _blend_bundle():
     """12 tracks: 5 A, 5 B, 2 joint. A's index 4 and B's index 9 lean toward
     the other side.

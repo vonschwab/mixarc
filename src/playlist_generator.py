@@ -2320,29 +2320,20 @@ class PlaylistGenerator:
                     # successful blend (human ruling, task-10 review).
                     _multi_artist_group_count = len(_ma_piers.groups)
 
-                    # Review Finding 8: arc-aware terminal-avoidance reorder.
-                    # select_multi_artist_piers's own per-group cluster_artist_
-                    # tracks calls already compute within-artist support
-                    # (support_by_index) -- this mirrors the single-artist tail's
-                    # _cap_order / explicit reorder_avoiding_low_support_terminal
-                    # calls, using the SAME shared function, so a blend cannot
-                    # seat a sonic-outlier pier in the closing seat just because
-                    # order_with_alternation (forced max alternation + minimax
-                    # sonic edge, 2026-07-30) has no notion of within-artist
-                    # support.
-                    if style_cfg.pier_support_terminal_avoidance and _ma_piers.support_by_index:
-                        _ma_xraw = np.asarray(getattr(bundle, "X_sonic"), dtype=float)
-                        _ma_xnorm = _ma_xraw / (np.linalg.norm(_ma_xraw, axis=1, keepdims=True) + 1e-12)
-                        ordered_medoids, _ma_terminal_changed = reorder_avoiding_low_support_terminal(
-                            ordered_medoids, _ma_piers.support_by_index, _ma_xnorm,
-                        )
-                        if _ma_terminal_changed:
-                            logger.info(
-                                "Multi-artist arc-aware ordering: moved the lowest-support "
-                                "pier off the terminal seat (support=%.3f) via an alternate "
-                                "sonic-order start",
-                                min(_ma_piers.support_by_index.get(i, 1.0) for i in ordered_medoids),
-                            )
+                    # Finding-1 fix (xhigh review): arc-aware terminal-avoidance
+                    # is no longer a separate post-hoc reorder here. It used to
+                    # run reorder_avoiding_low_support_terminal AFTER
+                    # select_multi_artist_piers had already forced the highest
+                    # safe artist alternation -- but that helper's preference is
+                    # a greedy nearest-neighbour search, which clumps same-artist
+                    # piers by construction (the exact reason the forced-
+                    # interleaving rewrite exists), so it silently discarded the
+                    # alternation just forced, on ~12.5% of two-artist runs. The
+                    # preference now lives INSIDE select_multi_artist_piers's own
+                    # order_with_alternation call (docs/superpowers/sdd/
+                    # xhigh-review-fixes/finding-1-report.md), applied as a
+                    # same-alternation-level tie-break, so _ma_piers.ordered_
+                    # medoids already reflects it -- nothing left to do here.
 
                     # Review Finding 2: blend piers must pass the same title-
                     # exclusion filter the single-artist tail applies

@@ -565,22 +565,68 @@ _FULL_ENUMERATION_PIER_CAP = 8
 _BEAM_WIDTH = 6
 
 
+def _avoids_terminal(order: Sequence[int], worst_support_pier: Optional[int]) -> bool:
+    """True when ``order`` does not seat ``worst_support_pier`` at either
+    terminal seat (index 0 or -1). ``worst_support_pier=None`` (no support
+    signal, or ``pier_support_terminal_avoidance`` off) makes this vacuously
+    True for every order -- a neutral element in the ``(mn, avoids, cost)``
+    comparison key below, so passing ``support_by_index=None`` reproduces the
+    pre-terminal-avoidance-folding behavior exactly.
+    """
+    if worst_support_pier is None:
+        return True
+    # With < 3 piers there is no interior seat (index 0 and -1 are the same
+    # two positions), so this is naturally always False when the worst pier
+    # is one of them -- mirrors reorder_avoiding_low_support_terminal's own
+    # "too few piers" early return without a separate branch for it.
+    return order[0] != worst_support_pier and order[-1] != worst_support_pier
+
+
+def _lowest_support_pier(
+    idx: Sequence[int], support_by_index: Optional[Dict[int, float]],
+) -> Optional[int]:
+    """The pier ``reorder_avoiding_low_support_terminal`` would call "worst":
+    lowest ``support_by_index`` value among ``idx``, ties broken to whichever
+    appears earliest in ``idx`` for determinism. Returns ``None`` when no
+    support signal was given at all (``support_by_index`` empty/``None``) --
+    the caller must treat that as "no preference", not "pier idx[0] is worst".
+    """
+    if not support_by_index:
+        return None
+    idx = list(idx)
+    return min(idx, key=lambda i: (support_by_index.get(i, 1.0), idx.index(i)))
+
+
 def _enumerate_best_orders_by_level(
     idx: List[int],
     X_norm: np.ndarray,
     group_of_index: Dict[int, str],
+    worst_support_pier: Optional[int] = None,
 ) -> Dict[int, Tuple[List[int], float, float]]:
     """Exact search over every permutation of ``idx`` (assumed small -- see
     ``_FULL_ENUMERATION_PIER_CAP``), grouped by achieved alternation count.
 
     Returns ``{alt_count: (order, min_edge, sonic_cost)}`` -- the best order
-    (highest min edge, tie-broken by highest total sonic cost) at EVERY
-    alternation level some permutation of these piers actually reaches, not
-    just the theoretical maximum. ``order_with_alternation``'s ladder search
-    walks this dict from the highest key down, taking the first level whose
-    worst edge clears the pier-adjacency floor -- the "unconstrained best"
-    (what the pre-ladder safety valve fell back to) is simply the entry with
-    the best ``(min_edge, cost)`` across every key, since every permutation
+    at EVERY alternation level some permutation of these piers actually
+    reaches, not just the theoretical maximum. Ranked ``(min_edge, avoids_
+    terminal, sonic_cost)`` -- minimax worst edge governs first (unchanged),
+    ``avoids_terminal`` (whether the order seats ``worst_support_pier``
+    somewhere other than index 0/-1) is a preference applied only to break
+    ties in worst edge, and total sonic cost breaks any tie still remaining.
+    Because ``min_edge`` is always compared first, folding in the terminal
+    preference can never change which ``min_edge`` wins a given level -- it
+    only changes WHICH order (among those already tied for that level's best
+    worst edge) is reported (2026-07-30, finding-1 fix: this preference used
+    to live in a SEPARATE post-hoc ``reorder_avoiding_low_support_terminal``
+    call in playlist_generator.py, a greedy nearest-neighbour search that
+    clumps same-artist piers by construction and silently discarded the
+    alternation this function had just forced -- see
+    docs/superpowers/sdd/xhigh-review-fixes/finding-1-report.md).
+    ``order_with_alternation``'s ladder search walks this dict from the
+    highest key down, taking the first level whose worst edge clears the
+    pier-adjacency floor -- the "unconstrained best" (what the pre-ladder
+    safety valve fell back to) is simply the entry with the best ``(min_edge,
+    avoids_terminal, cost)`` across every key, since every permutation
     belongs to exactly one level and each level's own best is already
     tracked here.
     """
@@ -589,19 +635,22 @@ def _enumerate_best_orders_by_level(
     sim = Xn @ Xn.T
     labels = [group_of_index.get(m, "") for m in idx]
 
-    by_level: Dict[int, Tuple[Tuple[int, ...], float, float]] = {}
+    by_level: Dict[int, Tuple[Tuple[int, ...], float, float, bool]] = {}
     for perm in itertools.permutations(range(n)):
         edges = [float(sim[perm[i], perm[i + 1]]) for i in range(n - 1)]
         mn = min(edges)
         cost = sum(edges)
         alt = sum(1 for i in range(n - 1) if labels[perm[i]] != labels[perm[i + 1]])
+        order_ids = [idx[k] for k in perm]
+        avoids = _avoids_terminal(order_ids, worst_support_pier)
+        key = (mn, avoids, cost)
         existing = by_level.get(alt)
-        if existing is None or (mn, cost) > (existing[1], existing[2]):
-            by_level[alt] = (perm, mn, cost)
+        if existing is None or key > (existing[1], existing[3], existing[2]):
+            by_level[alt] = (perm, mn, cost, avoids)
 
     return {
         alt: ([idx[k] for k in perm], mn, cost)
-        for alt, (perm, mn, cost) in by_level.items()
+        for alt, (perm, mn, cost, _avoids) in by_level.items()
     }
 
 
@@ -652,6 +701,7 @@ def _bounded_best_orders_by_level(
     group_of_index: Dict[int, str],
     max_alt: int,
     counts: Dict[str, int],
+    worst_support_pier: Optional[int] = None,
 ) -> Dict[int, Tuple[List[int], float, float]]:
     """Above the exact-enumeration cap: the per-level table
     ``_enumerate_best_orders_by_level`` produces exactly, approximated.
@@ -666,6 +716,18 @@ def _bounded_best_orders_by_level(
     (ignoring alternation entirely) so the table's global best-across-levels
     entry still matches what the old unconstrained fallback used to compute.
 
+    ``worst_support_pier``, like ``_enumerate_best_orders_by_level``'s own
+    parameter, is a tie-break PREFERENCE among the candidates this function
+    already generates for a level -- ranked ``(min_edge, avoids_terminal,
+    cost)`` in ``_consider`` below, so it can change which of THIS level's
+    generated candidates is kept but never which level's ``min_edge`` gets
+    reported. It is not a beam-search objective: ``_assign_medoids_to_labels``
+    itself still ranks its partial paths by ``(min_edge, cost)`` alone (the
+    interior/terminal distinction is largely undecidable mid-search), so this
+    is an approximation of the exact path's guarantee, consistent with this
+    whole function already being the approximate one (see the "not guaranteed
+    to populate every level" note below).
+
     Not guaranteed to populate every level an exact search would find (this
     is the approximate path, only reached above ``_FULL_ENUMERATION_PIER_CAP``
     piers) -- the ladder in ``order_with_alternation`` tolerates gaps by
@@ -675,13 +737,15 @@ def _bounded_best_orders_by_level(
     for i in idx:
         medoids_by_label.setdefault(group_of_index.get(i, ""), []).append(i)
 
-    levels: Dict[int, Tuple[List[int], float, float]] = {}
+    levels: Dict[int, Tuple[List[int], float, float, bool]] = {}
 
     def _consider(order: List[int], mn: float, cost: float) -> None:
         alt = _alternation_count(order, group_of_index)
+        avoids = _avoids_terminal(order, worst_support_pier)
+        key = (mn, avoids, cost)
         existing = levels.get(alt)
-        if existing is None or (mn, cost) > (existing[1], existing[2]):
-            levels[alt] = (order, mn, cost)
+        if existing is None or key > (existing[1], existing[3], existing[2]):
+            levels[alt] = (order, mn, cost, avoids)
 
     seen_seqs: set = set()
     for target in range(max_alt, -1, -1):
@@ -699,7 +763,7 @@ def _bounded_best_orders_by_level(
     unconstrained, unconstrained_min = _best_unconstrained_order_bounded(idx, X_norm)
     _consider(unconstrained, unconstrained_min, _path_sonic_cost(unconstrained, X_norm))
 
-    return levels
+    return {alt: (order, mn, cost) for alt, (order, mn, cost, _avoids) in levels.items()}
 
 
 def _best_unconstrained_order_bounded(
@@ -728,6 +792,7 @@ def order_with_alternation(
     group_of_index: Dict[int, str],
     *,
     pier_adjacency_floor: float = PIER_ADJACENCY_ALTERNATION_FLOOR,
+    support_by_index: Optional[Dict[int, float]] = None,
 ) -> Tuple[List[int], bool, int, int]:
     """Order piers to FORCE the highest artist alternation level that keeps a
     healthy pier-to-pier worst edge -- alternation is a hard constraint now,
@@ -765,6 +830,20 @@ def order_with_alternation(
     playlist floor here was the first cut's second bug: it rejected pier
     orders that went on to produce a perfectly healthy final playlist.
 
+    ``support_by_index``, when given (i.e. ``pier_support_terminal_avoidance``
+    is on and within-artist support was computed), folds the single-artist
+    tail's arc-aware terminal-avoidance preference (``reorder_avoiding_low_
+    support_terminal``'s reasoning: weakest edges cluster at anchor/terminal
+    seats) directly into this per-level search, as a tie-break applied AFTER
+    the minimax worst-edge criterion and BEFORE the sonic-cost tie-break --
+    see ``_avoids_terminal`` / ``_lowest_support_pier``. This replaces a
+    separate post-hoc reorder that used to run after this function returned
+    (a greedy nearest-neighbour search, which clumps same-artist piers by
+    construction and silently discarded the alternation just forced above --
+    finding-1 of the xhigh review, docs/superpowers/sdd/xhigh-review-fixes/
+    finding-1-report.md). Passing ``None`` (the default) reproduces this
+    function's pre-finding-1 behavior exactly.
+
     Returns ``(ordered, improved, achieved_alt, max_alt)``: ``improved`` is
     True when the returned order differs from the plain ``order_clusters``
     default walk; ``achieved_alt`` / ``max_alt`` let the caller report a
@@ -780,12 +859,15 @@ def order_with_alternation(
     counts = Counter(group_of_index.get(i, "") for i in idx)
     max_alt = _max_achievable_alternation(list(counts.values()))
     default = order_clusters(idx, X_norm)
+    worst_support_pier = _lowest_support_pier(idx, support_by_index)
 
     if len(idx) <= _FULL_ENUMERATION_PIER_CAP:
-        by_level = _enumerate_best_orders_by_level(idx, X_norm, group_of_index)
+        by_level = _enumerate_best_orders_by_level(
+            idx, X_norm, group_of_index, worst_support_pier,
+        )
     else:
         by_level = _bounded_best_orders_by_level(
-            idx, X_norm, group_of_index, max_alt, dict(counts),
+            idx, X_norm, group_of_index, max_alt, dict(counts), worst_support_pier,
         )
 
     if not by_level:
@@ -802,10 +884,46 @@ def order_with_alternation(
             default, _min_edge(default, X_norm), _path_sonic_cost(default, X_norm),
         )}
 
+    # Cross-level ranking (below) must be BLIND to the terminal-support
+    # preference: by_level's own per-level `cost` can be a WORSE (lower)
+    # value than the level's true best when the terminal-avoidance tie-break
+    # swapped in a same-mn, avoids-preferring order over the plain highest-
+    # cost one -- fine for a single level in isolation (nothing downstream
+    # reads that level's own cost once it is chosen), but poison for
+    # `unconstrained_level` below, which compares (mn, cost) ACROSS levels:
+    # a swapped-in lower cost at one level can flip which level wins that
+    # comparison, silently degrading the achieved alternation relative to
+    # what the very same call would return without a support signal --
+    # exactly the invariant this fix must never violate. Recomputing the
+    # avoids-BLIND per-level table (worst_support_pier=None collapses
+    # ``_avoids_terminal`` to always-True, i.e. today's plain (mn, cost)
+    # search) keeps that comparison stable; `by_level` itself (used just
+    # below to fetch the actual RETURNED order for whichever level wins) is
+    # unaffected since a level's ``mn`` is always the same in both tables --
+    # ``_avoids_terminal`` only ever breaks ties AT a level's own mn, never
+    # changes which mn wins that level.
+    plain_by_level = by_level
+    if worst_support_pier is not None:
+        _plain = (
+            _enumerate_best_orders_by_level(idx, X_norm, group_of_index)
+            if len(idx) <= _FULL_ENUMERATION_PIER_CAP
+            else _bounded_best_orders_by_level(idx, X_norm, group_of_index, max_alt, dict(counts))
+        )
+        if _plain:
+            # Guards the defensive "level search produced no candidates at
+            # all" branch above: that branch already hand-built a non-empty
+            # single-entry ``by_level`` -- an empty ``_plain`` here (the same
+            # "should never happen" condition, just without the support
+            # signal) must not replace it with something that makes the
+            # ``max()`` below crash on an empty dict.
+            plain_by_level = _plain
+
     # The single best (min edge, then cost) order across every level -- what
     # the old pre-ladder safety valve always fell back to, and this ladder's
     # own last resort when nothing clears the floor.
-    unconstrained_level = max(by_level, key=lambda lvl: (by_level[lvl][1], by_level[lvl][2]))
+    unconstrained_level = max(
+        plain_by_level, key=lambda lvl: (plain_by_level[lvl][1], plain_by_level[lvl][2]),
+    )
     unconstrained, unconstrained_min, _unconstrained_cost = by_level[unconstrained_level]
 
     floor = float(pier_adjacency_floor)
@@ -863,12 +981,15 @@ class MultiArtistPiers:
     blocked_artist_keys: frozenset
     # Merged within-artist support (compute_within_artist_support, keyed by
     # bundle index) across every group's own cluster_artist_tracks call.
-    # Previously computed and thrown away per-group (review Finding 8) --
-    # exposed so the caller can run the same arc-aware terminal-avoidance
-    # reorder the single-artist tail applies (reorder_avoiding_low_support_
-    # terminal), instead of the blend silently skipping it. Defaults to {}
-    # so existing call sites that construct MultiArtistPiers without it keep
-    # working.
+    # Previously computed and thrown away per-group (review Finding 8).
+    # ``select_multi_artist_piers`` already folds this into its own
+    # ``order_with_alternation`` call (the terminal-support preference lives
+    # THERE now, not in a caller-side post-hoc reorder -- finding-1 of the
+    # xhigh review fixed a defect where that post-hoc reorder silently
+    # discarded the forced alternation). Kept exposed here for callers'
+    # diagnostics/tests, not because a caller needs to act on it. Defaults to
+    # {} so existing call sites that construct MultiArtistPiers without it
+    # keep working.
     support_by_index: Dict[int, float] = field(default_factory=dict)
 
 
@@ -1272,9 +1393,21 @@ def select_multi_artist_piers(
         "must have succeeded and set X_norm_shared -- a future refactor of the "
         "loop above must preserve this."
     )
+    # Finding-1 fix (xhigh review): terminal-support avoidance is folded into
+    # this SAME search (as a same-alternation-level tie-break -- see
+    # order_with_alternation's docstring), not applied afterward. A separate
+    # post-hoc reorder here (or in the caller) would repeat the exact defect
+    # this fixed: a greedy nearest-neighbour walk that clumps same-artist
+    # piers by construction, silently discarding the alternation just forced.
+    # Gated the same way the old post-hoc call was
+    # (``style_cfg.pier_support_terminal_avoidance``) so disabling the knob
+    # reproduces the pre-Task-3 (no terminal preference at all) behavior.
     ordered, _improved, _achieved_alt, _max_alt = order_with_alternation(
         all_medoids, X_norm_shared, group_of_index,
         pier_adjacency_floor=ma_cfg.pier_adjacency_floor,
+        support_by_index=(
+            support_by_index if style_cfg.pier_support_terminal_avoidance else None
+        ),
     )
     if _achieved_alt < _max_alt:
         # The alternation ladder had to step down from the theoretical
