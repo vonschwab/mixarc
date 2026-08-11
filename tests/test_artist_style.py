@@ -1,3 +1,4 @@
+import math
 import types
 from pathlib import Path
 
@@ -1227,6 +1228,57 @@ def test_outlier_cluster_contributes_no_piers_and_slots_reallocate():
     assert sorted(len(m) for m in by_cluster) == [0, 3]   # B empty; A bumped to all 3
     assert all(m in {0, 1, 2} for m in medoids)    # every pier from cluster A
     assert len(medoids) == 3                       # ceil(4/1)=4 capped by cluster size
+
+
+def _partial_veto_fixture():
+    """Every cluster keeps an eligible member, but cluster B keeps only ONE.
+
+    This is the shape the whole-cluster reallocation above does NOT cover: no
+    cluster is fully vetoed, so ``eff_top_k`` never gets bumped, yet cluster B
+    can only supply 1 of its 2 slots and the pier count silently falls short.
+
+    Rows 0-2: cluster A near e0 — all bridgeable (library mass on e0).
+    Rows 3-4: cluster B, 21.9 degrees apart so kmeans keeps them together.
+              Its library mass sits at 41.4 degrees from row 3 (cos 0.75 ->
+              bridgeable) but 63.3 degrees from row 4 (cos 0.45 -> vetoed).
+    """
+    e = np.eye(6)
+    u, v, j = e[1], e[2], e[5]
+    b_eligible = math.cos(math.radians(21.9)) * u + math.sin(math.radians(21.9)) * v
+    b_vetoed = u
+    lib_b_dir = math.cos(math.radians(63.3)) * u + math.sin(math.radians(63.3)) * v
+    a_rows = [e[0] + d * j for d in (0.00, 0.01, -0.01)]
+    lib_a = [e[0] + d * j for d in (0.02, -0.02, 0.03, -0.03)]
+    lib_b = [lib_b_dir + d * j for d in (0.0, 0.005, -0.005, 0.01)]
+    X = _unit_rows(a_rows + [b_eligible, b_vetoed] + lib_a + lib_b)
+    artist_keys = np.array(["a"] * 5 + ["lib"] * 8)
+    track_ids = np.array([f"t{i}" for i in range(13)])
+    return DummyBundle(X_sonic=X, artist_keys=artist_keys, track_ids=track_ids)
+
+
+def test_partial_veto_backfills_instead_of_shrinking_pier_count():
+    bundle = _partial_veto_fixture()
+    clusters, medoids, by_cluster, _X, _support = cluster_artist_tracks(
+        bundle=bundle, artist_name="A", cfg=_cfg_bridge(), random_seed=0,
+        medoid_top_k=2, target_pier_count=4,
+    )
+    assert len(clusters) == 2                      # cluster membership untouched
+    assert 4 not in medoids                        # the vetoed outlier never seats
+    assert len(medoids) == 4                       # pier count HELD, not reduced
+    # The extra pier comes from cluster A -- the cluster that still has eligible
+    # members and ranks most representative.
+    assert sum(1 for m in medoids if m in {0, 1, 2}) == 3
+
+
+def test_backfill_never_exceeds_eligible_supply():
+    """Backfill stops at the real cap: it may not invent or un-veto piers."""
+    bundle = _bridgeability_fixture()
+    _clusters, medoids, _by_cluster, _X, _support = cluster_artist_tracks(
+        bundle=bundle, artist_name="A", cfg=_cfg_bridge(), random_seed=0,
+        medoid_top_k=2, target_pier_count=6,
+    )
+    assert len(medoids) == 3                       # only 3 eligible members exist
+    assert all(m in {0, 1, 2} for m in medoids)
 
 
 def test_bridgeability_all_fail_falls_back_unchecked():

@@ -4,7 +4,7 @@ import logging
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -598,7 +598,7 @@ def _support_penalty(support: float, strength: float) -> float:
     return max(0.0, 1.0 - float(support)) * max(0.0, float(strength))
 
 
-def _medoids_for_cluster(
+def _ranked_candidates_for_cluster(
     X: np.ndarray,
     indices: List[int],
     centroid: np.ndarray,
@@ -622,7 +622,14 @@ def _medoids_for_cluster(
     overlap_values: Optional[np.ndarray] = None,
 ) -> List[int]:
     """
-    Select medoids using weighted scoring that penalizes duration outliers.
+    Rank a cluster's members as pier candidates, best first.
+
+    Returns the cluster's FULL preference ordering, not just the top
+    ``per_cluster``. Callers slice it. Keeping the whole ranking is what lets
+    ``cluster_artist_tracks`` backfill a pier later -- when a vetoed medoid or a
+    thin cluster leaves the playlist short of ``target_pier_count`` -- without
+    re-running this function and re-drawing ``rng``, which would destabilise the
+    first pick. ``per_cluster`` therefore only controls the debug log.
 
     Weighting strategy (configurable):
     - similarity_weight (default 70%): similarity to cluster centroid (sonic cohesion)
@@ -715,29 +722,31 @@ def _medoids_for_cluster(
     top_k_val = max(1, min(int(top_k), len(indices)))
     medoid_idx = int(order[int(rng.integers(0, top_k_val))])
 
-    medoids: List[int] = [indices[medoid_idx]]
+    ranking: List[int] = [indices[medoid_idx]]
 
-    if per_cluster > 1 and len(indices) > 1:
+    if len(indices) > 1:
         # Pick farthest from first medoid to diversify
         # But still respect the quality scores
-        first_vec = X[medoids[0]]
+        first_vec = X[ranking[0]]
         sims2 = np.dot(X[indices], first_vec)
 
         # Combine diversity (low similarity to first) with quality (high overall score)
         diversity_scores = (1.0 - sims2) * 0.6 + scores * 0.4
         order2 = np.argsort(-diversity_scores)
 
+        # Rank ALL remaining members, not just up to `per_cluster`: the tail is
+        # the backfill reserve. Truncating here is what used to make a vetoed
+        # medoid shrink the pier count instead of being replaced.
         for idx in order2:
             cand = indices[int(idx)]
-            if cand not in medoids:
-                medoids.append(cand)
-            if len(medoids) >= per_cluster:
-                break
+            if cand not in ranking:
+                ranking.append(cand)
 
     # Debug logging
+    selected = ranking[: max(1, int(per_cluster))]
     if artist_duration_stats and track_durations_ms is not None:
         medoid_info = []
-        for m in medoids:
+        for m in selected:
             cluster_local_idx = indices.index(m)
             dur_sec = track_durations_ms[m] / 1000.0
             score = scores[cluster_local_idx]
@@ -746,10 +755,22 @@ def _medoids_for_cluster(
     else:
         logger.debug(
             "Cluster medoids selected: %s",
-            [str(bundle_track_ids[i]) for i in medoids],
+            [str(bundle_track_ids[i]) for i in selected],
         )
 
-    return medoids
+    return ranking
+
+
+def _medoids_for_cluster(*args: Any, **kwargs: Any) -> List[int]:
+    """Top-``per_cluster`` slice of :func:`_ranked_candidates_for_cluster`.
+
+    Kept as the narrow "just give me this cluster's medoids" entry point;
+    ``cluster_artist_tracks`` calls the ranked function directly because it also
+    needs the unused tail to backfill from.
+    """
+    per_cluster = kwargs.get("per_cluster", args[4] if len(args) > 4 else 1)
+    ranking = _ranked_candidates_for_cluster(*args, **kwargs)
+    return ranking[: max(1, int(per_cluster))]
 
 
 def compute_pier_bridgeability(
@@ -1267,6 +1288,8 @@ def cluster_artist_tracks(
     clusters: List[List[int]] = []
     medoids: List[int] = []
     medoids_by_cluster: List[List[int]] = []
+    # Per-cluster unused ranked candidates, kept as the backfill reserve below.
+    reserve_by_cluster: Dict[int, List[int]] = {}
     span_width = (energy_span[1] - energy_span[0]) if energy_span is not None else 0.0
     for ci, (c, members_local) in enumerate(nonempty):
         clusters.append(members_local)
@@ -1322,7 +1345,7 @@ def cluster_artist_tracks(
         overlap_slice: Optional[np.ndarray] = None
         if overlap_affinity is not None and float(overlap_weight) > 0.0:
             overlap_slice = np.asarray(overlap_affinity, dtype=float)[members_eligible]
-        medoid_list = _medoids_for_cluster(
+        ranked = _ranked_candidates_for_cluster(
             X_norm,
             members_eligible,
             centroids[c],
@@ -1345,12 +1368,60 @@ def cluster_artist_tracks(
             float(overlap_weight),
             overlap_slice,
         )
+        medoid_list = ranked[: max(1, int(eff_top_k))]
+        reserve_by_cluster[ci] = ranked[len(medoid_list):]
         medoids_by_cluster.append(medoid_list)
         medoids.extend(medoid_list)
-    if bridgeable_set is not None and target_pier_count and len(medoids) < int(target_pier_count):
+
+    # Backfill: a vetoed medoid (or a cluster too thin to fill its slots) must
+    # NOT shrink the playlist's seed-artist presence -- the pier COUNT is what
+    # the artist-presence dial promises, so a rejected candidate is replaced,
+    # not dropped. The whole-cluster reallocation above only fires when a
+    # cluster is ENTIRELY vetoed; this covers the far commoner partial case.
+    #
+    # Candidates come from each cluster's unused ranked tail, which was built
+    # from `members_eligible` only -- so backfill can never re-seat a vetoed
+    # track, and never exceeds the real eligible supply. Clusters are visited
+    # most-representative-first (most eligible members = most of this artist's
+    # catalog lives there) and round-robin, so extra piers spread across the
+    # artist's range instead of stacking in one corner of it.
+    if target_pier_count and len(medoids) < int(target_pier_count):
+        by_representativeness = sorted(
+            range(len(medoids_by_cluster)),
+            key=lambda ci: (
+                -(len(medoids_by_cluster[ci]) + len(reserve_by_cluster.get(ci, []))),
+                ci,
+            ),
+        )
+        backfilled: List[int] = []
+        while len(medoids) < int(target_pier_count):
+            progressed = False
+            for ci in by_representativeness:
+                if len(medoids) >= int(target_pier_count):
+                    break
+                reserve = reserve_by_cluster.get(ci)
+                if not reserve:
+                    continue
+                pick = reserve.pop(0)
+                medoids_by_cluster[ci].append(pick)
+                medoids.append(pick)
+                backfilled.append(pick)
+                progressed = True
+            if not progressed:
+                break  # eligible supply exhausted -- the shortfall is real
+        if backfilled:
+            logger.info(
+                "Pier backfill: replaced %d unfilled pier slot(s) from the most "
+                "representative cluster(s) rather than shrinking the playlist -- "
+                "now %d/%d piers: %s",
+                len(backfilled), len(medoids), int(target_pier_count),
+                [str(bundle.track_ids[i]) for i in backfilled],
+            )
+    if target_pier_count and len(medoids) < int(target_pier_count):
         logger.warning(
-            "Pier bridgeability: after veto+reallocation only %d medoid(s) available vs "
-            "target_pier_count=%d — playlist will have fewer seed-artist piers.",
+            "Pier shortfall: only %d medoid(s) available vs target_pier_count=%d even "
+            "after backfill — the artist has too few bridgeable tracks; playlist will "
+            "have fewer seed-artist piers.",
             len(medoids), int(target_pier_count),
         )
     logger.info(
