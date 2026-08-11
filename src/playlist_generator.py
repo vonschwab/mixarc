@@ -24,6 +24,7 @@ from src.playlist.artist_style import (
     _select_k,
     _artist_indices_in_bundle,
 )
+from src.playlist.artist_identity_resolver import parse_artist_identity_config
 from src.playlist.pier_bridge_builder import PierBridgeConfig, resolve_pier_bridge_tuning
 from src.playlist.pier_bridge.config import roam_kwargs_from_dict
 from src.playlist.config import default_ds_config, get_min_sonic_similarity, resolve_cohesion_mode
@@ -3111,7 +3112,10 @@ class PlaylistGenerator:
             if os.environ.get("PLAYLIST_DIAG_RECENCY"):
                 logger.info("Recency diag: post-order filtering disabled; no edge diff computed.")
         title = f"Auto: {artist_name}"
-        self._print_playlist_report(final_tracks, artist_name=artist_name, dynamic=dynamic, verbose_edges=verbose)
+        self._print_playlist_report(
+            final_tracks, artist_name=artist_name, dynamic=dynamic, verbose_edges=verbose,
+            seed_artist_names=[n for n in (artist_names or []) if str(n or "").strip()] or None,
+        )
 
         _swap_log = (
             (self._last_ds_report.get("playlist_stats") or {})
@@ -4860,6 +4864,7 @@ class PlaylistGenerator:
         artist_name: str = None,
         dynamic: bool = False,
         verbose_edges: bool = False,
+        seed_artist_names: Optional[List[str]] = None,
     ):
         """
         Print detailed track report showing how each track was selected
@@ -4869,7 +4874,15 @@ class PlaylistGenerator:
             artist_name: Name of seed artist (if applicable)
             dynamic: Whether dynamic mode was used
             verbose_edges: Whether to print per-edge scores when available (DS)
+            seed_artist_names: Every chip of a multi-artist blend, so the
+                seed-share report covers all of them and not just the primary.
         """
+        # The reporter must resolve artist identity the same way the generator
+        # did, or its seed-share percentage describes a different run.
+        ds_cfg = self.config.get("playlists", "ds_pipeline", default={}) or {}
+        artist_identity_cfg = parse_artist_identity_config(
+            (ds_cfg.get("constraints", {}) or {}).get("artist_identity", {})
+        )
         # Phase 9: Delegate to reporter module
         reporter.print_playlist_report(
             tracks=tracks,
@@ -4879,6 +4892,8 @@ class PlaylistGenerator:
             last_ds_report=getattr(self, "_last_ds_report", None),
             last_scope=getattr(self, "_last_scope", None),
             last_cohesion_mode=getattr(self, "_last_cohesion_mode", None),
+            seed_artist_names=seed_artist_names,
+            artist_identity_cfg=artist_identity_cfg,
         )
 
 

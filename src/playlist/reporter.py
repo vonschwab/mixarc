@@ -7,11 +7,15 @@ including edge score computation and comprehensive statistics.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Sequence, Tuple
 import logging
 import os
 import numpy as np
 
+from src.playlist.artist_identity_resolver import (
+    ArtistIdentityConfig,
+    resolve_artist_identity_keys,
+)
 from src.playlist.utils import sanitize_for_logging
 from src.features.artifacts import load_artifact_bundle
 from src.playlist.transition_metrics import (
@@ -447,6 +451,65 @@ def compute_edge_scores_from_artifact(
     return edge_scores
 
 
+def _report_seed_artist_share(
+    tracks: List[Dict[str, Any]],
+    artist_name: Optional[str],
+    seed_artist_names: Optional[Sequence[str]],
+    artist_identity_cfg: Optional["ArtistIdentityConfig"],
+) -> None:
+    """Log how much of the playlist each seed artist actually occupies.
+
+    Counts with ``resolve_artist_identity_keys`` -- the SAME resolution the
+    generator used to seat the piers. The previous raw ``.strip().casefold()``
+    equality made this number wrong in both directions on real playlists:
+    "The Bill Evans Trio" and "Macross 82-99 feat. Desired" were credited to
+    nobody, so a Bill Evans blend with six seated piers reported 3.3%, and a
+    MACROSS 82-99 playlist holding seven of its tracks reported five.
+
+    For a multi-artist blend every chip gets its own line plus a combined one.
+    Reporting only the primary chip is what made a 3/3 split read as 10% when
+    the playlist was 20% seed artists, which reads as a shortfall that isn't
+    there. The combined figure counts TRACKS, not credits, so a track credited
+    to two seed artists at once is not double-counted.
+    """
+    names = [str(n) for n in (seed_artist_names or []) if str(n or "").strip()]
+    if not names and artist_name:
+        names = [str(artist_name)]
+    if not names or not tracks:
+        return
+
+    cfg = artist_identity_cfg if artist_identity_cfg is not None else ArtistIdentityConfig()
+    track_keys = [
+        resolve_artist_identity_keys(str(t.get("artist") or ""), cfg) for t in tracks
+    ]
+
+    total = len(tracks)
+    matched_any = [False] * total
+    for name in names:
+        seed_keys = resolve_artist_identity_keys(name, cfg)
+        count = 0
+        for i, keys in enumerate(track_keys):
+            if keys & seed_keys:
+                count += 1
+                matched_any[i] = True
+        logger.info(
+            "  - Seed artist (%s): %d tracks (%.1f%%)",
+            sanitize_for_logging(name), count, count / total * 100,
+        )
+        logger.debug(
+            "Seed artist identity keys: %s=%s | first3 track keys: %s",
+            sanitize_for_logging(name), sorted(seed_keys),
+            [sorted(k) for k in track_keys[:3]],
+        )
+
+    if len(names) > 1:
+        combined = sum(1 for m in matched_any if m)
+        logger.info(
+            "  - Seed artists combined: %d tracks (%.1f%%)",
+            combined, combined / total * 100,
+        )
+
+
 def print_playlist_report(
     *,
     tracks: List[Dict[str, Any]],
@@ -456,6 +519,8 @@ def print_playlist_report(
     last_ds_report: Optional[Dict[str, Any]] = None,
     last_scope: Optional[str] = None,
     last_cohesion_mode: Optional[str] = None,
+    seed_artist_names: Optional[Sequence[str]] = None,
+    artist_identity_cfg: Optional["ArtistIdentityConfig"] = None,
 ):
     """
     Print detailed track report showing how each track was selected.
@@ -468,6 +533,12 @@ def print_playlist_report(
         last_ds_report: Last DS report dictionary
         last_scope: Last scope value
         last_cohesion_mode: Last cohesion mode value
+        seed_artist_names: Every seed chip for a multi-artist blend. Falls back
+            to ``artist_name`` alone when absent.
+        artist_identity_cfg: The identity config the generator resolved with.
+            Defaults to a DISABLED config, which reproduces plain normalized
+            matching -- pass the real one or the share is counted differently
+            than the piers were seated.
     """
     logger.info("=" * 80)
     # Pipeline context summary if available
@@ -891,13 +962,9 @@ def print_playlist_report(
         else:
             logger.info(f"  - Sonic similarity: {source_counts.get('sonic', 0)} tracks")
 
-    if artist_name:
-        seed_norm = (artist_name or "").strip().casefold()
-        norm_artists = [(t.get("artist") or "").strip().casefold() for t in tracks]
-        seed_count = sum(1 for a in norm_artists if a == seed_norm)
-        seed_pct = (seed_count / len(tracks)) * 100 if tracks else 0
-        logger.debug("Seed artist normalized: %s | first3 track artists: %s", seed_norm, norm_artists[:3])
-        logger.info(f"  - Seed artist ({sanitize_for_logging(artist_name)}): {seed_count} tracks ({seed_pct:.1f}%)")
+    _report_seed_artist_share(
+        tracks, artist_name, seed_artist_names, artist_identity_cfg
+    )
 
     # Duration info
     total_duration_ms = sum((track.get('duration') or 0) for track in tracks)

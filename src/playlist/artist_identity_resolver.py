@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Set, List
+from typing import Any, Set, List
 import logging
 
 from src.string_utils import normalize_artist_key
@@ -136,6 +136,31 @@ def _strip_ensemble_designator(component: str, terms: List[str]) -> str:
             break
 
     return component
+
+
+def parse_artist_identity_config(raw: Any) -> ArtistIdentityConfig:
+    """Build an :class:`ArtistIdentityConfig` from a ``constraints.artist_identity`` mapping.
+
+    Single source of truth for that parse. It previously lived inline in
+    ``pipeline/core.py``; anything else needing the same config (the playlist
+    reporter's seed-share count, for one) must resolve identity the SAME way the
+    generator did, or its numbers describe a different run than the one that
+    happened.
+
+    A missing or non-mapping value yields the dataclass defaults, which have
+    ``enabled=False`` -- identity resolution stays opt-in, exactly as before.
+    """
+    if not isinstance(raw, dict):
+        return ArtistIdentityConfig()
+    defaults = ArtistIdentityConfig()
+    return ArtistIdentityConfig(
+        enabled=bool(raw.get("enabled", False)),
+        split_delimiters=list(raw.get("split_delimiters") or defaults.split_delimiters),
+        strip_trailing_ensemble_terms=bool(raw.get("strip_trailing_ensemble_terms", True)),
+        trailing_ensemble_terms=list(
+            raw.get("trailing_ensemble_terms") or defaults.trailing_ensemble_terms
+        ),
+    )
 
 
 def resolve_artist_identity_keys(

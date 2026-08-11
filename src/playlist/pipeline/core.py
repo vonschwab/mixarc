@@ -20,7 +20,7 @@ from src.playlist.pier_bridge_builder import (
     PierBridgeResult,
     build_pier_bridge_playlist,
 )
-from src.playlist.artist_identity_resolver import ArtistIdentityConfig
+from src.playlist.artist_identity_resolver import parse_artist_identity_config
 from src.playlist.pipeline.audit_emitter import AuditEmitter
 from src.playlist.pipeline.bundle_restrict import restrict_bundle
 from src.playlist.pipeline.embedding_setup import setup_embedding
@@ -433,17 +433,9 @@ def generate_playlist_ds(
     # Parse artist identity config from constraints.artist_identity
     constraints_overrides = (overrides or {}).get("constraints", {}) if isinstance(overrides, dict) else {}
     artist_identity_overrides = constraints_overrides.get("artist_identity", {})
-    if isinstance(artist_identity_overrides, dict):
-        # Parse config fields with defaults
-        artist_identity_cfg = ArtistIdentityConfig(
-            enabled=bool(artist_identity_overrides.get("enabled", False)),
-            split_delimiters=list(artist_identity_overrides.get("split_delimiters", [])) if artist_identity_overrides.get("split_delimiters") else None or ArtistIdentityConfig().split_delimiters,
-            strip_trailing_ensemble_terms=bool(artist_identity_overrides.get("strip_trailing_ensemble_terms", True)),
-            trailing_ensemble_terms=list(artist_identity_overrides.get("trailing_ensemble_terms", [])) if artist_identity_overrides.get("trailing_ensemble_terms") else None or ArtistIdentityConfig().trailing_ensemble_terms,
-        )
-    else:
-        # No config provided or invalid: use defaults (disabled)
-        artist_identity_cfg = ArtistIdentityConfig()
+    # Shared parse (artist_identity_resolver.parse_artist_identity_config) so the
+    # reporter's seed-share count resolves identity exactly as the beam did.
+    artist_identity_cfg = parse_artist_identity_config(artist_identity_overrides)
 
     if artist_identity_cfg.enabled:
         logger.info("Artist identity resolution enabled for min_gap enforcement")
