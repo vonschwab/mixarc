@@ -340,25 +340,70 @@ def total_pier_budget(
 ) -> int:
     """Total piers across all groups.
 
-    ``max_artist_fraction`` (the Artist-presence dial) is EACH seed artist's share,
-    so N groups get N times the single-artist base -- clamped by a floor that keeps
-    bridge segments long enough to be bridgeable, and never below one per group.
+    ``max_artist_fraction`` (the Artist-presence dial) is the share of the
+    PLAYLIST occupied by seed-artist tracks IN TOTAL -- not per chip. A
+    100-track playlist at High (0.20) seats 20 seed tracks; two chips split them
+    10/10. ``allocate_pier_budget`` gives the remainder to the first chip, so an
+    odd total rounds that chip up. A blend therefore uses exactly the same
+    formula as a single artist, which is what the GUI's "target share of the
+    playlist from the seed artist" label has always promised.
 
-    The clamp is ``track_count // 5``, not ``// 3``: Task 13 live acceptance testing
-    (task-13-report.md) measured ``// 3`` producing 10 piers for a 30-track/3-group
-    blend (Eno + Budd + their joint credit) -- 9 bridge segments averaging ~2.2
-    tracks each, versus ~8.7 for a comparable solo playlist's 6 piers. That is a
-    genuine starvation defect: too little room for the beam to land a smooth
-    transition, independent of any ordering or overlap-weight tuning (both were
-    swept and proven not to move the result). ``// 5`` widens the same 30-track/
-    3-group case to 6 piers (~4.8 tracks/segment) -- human-ruled fix, 2026-07-30.
+    HUMAN RULING 2026-08-10 (Dylan): this replaces an ``n * base`` per-chip
+    reading clamped by ``track_count // 5``. Two defects, one fix:
+
+    1. The clamp made the dial completely INERT for 2+ chips. On a 30-track
+       blend every position from Very Low to Very High returned the same 6
+       piers, because ``n * base`` (>= 6 for two chips at any fraction, since
+       ``base`` floors at 3) always exceeded the cap. A knob that cannot act is
+       this codebase's #1 failure mode -- see CLAUDE.md principle 22.
+    2. The per-chip reading the clamp was defending is undeliverable anyway:
+       two chips at High wants 12 piers on 30 tracks, i.e. ~1.6 tracks per
+       bridge segment -- well under the ~2.2 that Task 13 (task-13-report.md)
+       measured as starved when it changed the clamp from ``// 3`` to ``// 5``.
+
+    Task 13's starvation concern is now a DIAGNOSTIC rather than a silent cap
+    (``warn_if_bridge_density_thin``): the dial is honoured and a thin-bridge
+    blend says so in the log. A blend is never denser than a single-artist
+    playlist at the same dial position, and single-artist has never been capped.
     """
     base = max(3, round(int(track_count) * float(max_artist_fraction)))
-    n = max(1, int(n_groups))
-    if n == 1:
-        return base
-    segment_floor = max(n, int(track_count) // 5)
-    return max(n, min(n * base, segment_floor))
+    return max(max(1, int(n_groups)), base)
+
+
+#: Bridge tracks per segment at or below which a blend is called thin.
+#: Task 13 measured the starved case at 10 piers on 30 tracks -- 20 interior
+#: over 9 segments = 2.22, "almost no room to bridge" -- and the healthy case
+#: at 6 piers = 24/5 = 4.8. 2.5 sits above the measured-starved figure (so it
+#: actually fires on it) and well below the healthy one.
+#: Diagnostic threshold only -- it warns, it never caps. See total_pier_budget.
+THIN_BRIDGE_TRACKS_PER_SEGMENT = 2.5
+
+
+def warn_if_bridge_density_thin(track_count: int, total_piers: int) -> Optional[float]:
+    """Log a WARNING when a pier budget leaves bridge segments too thin to work.
+
+    Returns the tracks-per-segment figure (None when there are no interior
+    segments to measure). Purely diagnostic: the artist-presence dial is the
+    user's call, and this makes the structural cost of the top of that dial
+    visible instead of silently overriding it -- the failure mode the old
+    ``track_count // 5`` clamp had.
+    """
+    segments = max(0, int(total_piers) - 1)
+    if segments <= 0:
+        return None
+    interior = max(0, int(track_count) - int(total_piers))
+    per_segment = interior / segments
+    if per_segment <= THIN_BRIDGE_TRACKS_PER_SEGMENT:
+        logger.warning(
+            "Multi-artist bridge density: %d piers on a %d-track playlist leaves "
+            "%.1f track(s) per bridge segment (at or below the %.1f Task 13 measured "
+            "as starved). Seed-artist presence is being honoured as requested; expect "
+            "rougher transitions. Lower artist presence or raise the track count for "
+            "more room to bridge.",
+            int(total_piers), int(track_count), per_segment,
+            THIN_BRIDGE_TRACKS_PER_SEGMENT,
+        )
+    return per_segment
 
 
 def allocate_pier_budget(
@@ -1294,6 +1339,7 @@ def select_multi_artist_piers(
         "Multi-artist pier budget: total=%d allocation=%s (track_count=%d, "
         "max_artist_fraction=%.3f)", total, alloc, track_count, max_artist_fraction,
     )
+    warn_if_bridge_density_thin(track_count, total)
 
     all_medoids: List[int] = []
     group_of_index: Dict[int, str] = {}

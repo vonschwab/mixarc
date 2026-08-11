@@ -343,17 +343,63 @@ def test_single_group_budget_matches_todays_formula():
         assert total_pier_budget(tracks, frac, 1) == max(3, round(tracks * frac))
 
 
-def test_two_groups_double_the_budget_within_the_segment_floor():
-    # Human ruling 2026-07-30 (task-13-report.md): the segment_floor clamp
-    # changed from track_count // 3 to track_count // 5 -- // 3 was a real
-    # pier-density starvation defect (10 piers on a 30-track/3-group blend
-    # left ~2.2 tracks per bridge segment; see multi_artist.py's
-    # total_pier_budget docstring). These two expected values are recomputed
-    # by hand from the NEW formula, not loosened.
-    # 30 tracks, 0.125 -> base 4; two groups -> 8; floor = 30 // 5 = 6 -> clamped to 6
-    assert total_pier_budget(30, 0.125, 2) == 6
-    # 15 tracks, 0.125 -> base 3; two groups -> 6; floor = 15 // 5 = 3 -> clamped to 3
-    assert total_pier_budget(15, 0.125, 2) == 3
+def test_budget_is_a_total_share_not_a_per_chip_share():
+    """Human ruling 2026-08-10 (Dylan): the dial is the share of the PLAYLIST
+    that seed tracks occupy IN TOTAL, split across the chips -- so a blend gets
+    the same budget as a single artist at the same dial position, and chip
+    count never inflates it.
+
+    This replaces the old ``n * base`` reading clamped by ``track_count // 5``.
+    That clamp made the dial INERT: every position from Very Low to Very High
+    returned 6 on a 30-track 2-chip blend.
+    """
+    # Dylan's worked example: 100 tracks at High (0.20) -> 20 seed tracks, 10 each.
+    assert total_pier_budget(100, 0.20, 2) == 20
+    # Chip count does not change the total.
+    for n in (1, 2, 3):
+        assert total_pier_budget(30, 0.20, n) == 6
+        assert total_pier_budget(100, 0.20, n) == 20
+
+
+def test_dial_actually_moves_a_two_chip_budget():
+    """The regression that started this: on a 30-track 2-chip blend the old
+    formula returned 6 at EVERY dial position. Distinct positions must now
+    produce distinct budgets."""
+    budgets = [total_pier_budget(30, f, 2) for f in (0.05, 0.10, 0.12, 0.20, 0.33)]
+    assert budgets == [3, 3, 4, 6, 10], budgets
+    assert len(set(budgets)) > 1, "the artist-presence dial must not be inert"
+
+
+def test_thin_bridges_warn_instead_of_capping_the_dial(caplog):
+    """Task 13's starvation finding survives as a DIAGNOSTIC, not a silent cap.
+
+    The old ``track_count // 5`` clamp protected bridge density by overriding
+    the dial without saying so -- exactly the "configured knob that can't act"
+    failure mode. Now the dial is honoured and the cost is logged.
+    """
+    from src.playlist.multi_artist import warn_if_bridge_density_thin
+
+    # Very High on a 30-track blend: 10 piers, 20 interior over 9 segments = 2.22
+    # -- the exact density Task 13 measured as starved.
+    with caplog.at_level(logging.WARNING, logger="src.playlist.multi_artist"):
+        per_segment = warn_if_bridge_density_thin(30, 10)
+    assert per_segment == pytest.approx(20 / 9, abs=1e-6)
+    assert any("bridge density" in r.message.lower() for r in caplog.records), caplog.text
+
+    # High on the same playlist: 6 piers, 24 interior over 5 segments = 4.8 -- silent.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="src.playlist.multi_artist"):
+        per_segment = warn_if_bridge_density_thin(30, 6)
+    assert per_segment == pytest.approx(24 / 5, abs=1e-6)
+    assert not caplog.records, caplog.text
+
+
+def test_bridge_density_warning_handles_degenerate_pier_counts():
+    """No interior segments to measure -> nothing to say, and no ZeroDivision."""
+    from src.playlist.multi_artist import warn_if_bridge_density_thin
+
+    assert warn_if_bridge_density_thin(30, 1) is None
+    assert warn_if_bridge_density_thin(30, 0) is None
 
 
 def test_budget_never_drops_below_one_per_group():
@@ -1296,12 +1342,18 @@ def test_zero_allocation_group_is_reported_not_silently_skipped():
     group zero piers (here: the joint group's own 5-track catalog clears the
     Finding-8 cluster floor, but the total budget is too small to reach
     joint_pier_min_budget) -- this is a real degradation of what the user
-    asked for and must be reported, never silently skipped."""
+    asked for and must be reported, never silently skipped.
+
+    ``joint_pier_min_budget`` is 5, not 3: under the 2026-08-10 total-share
+    budget this case yields 3 piers (30% of 10 tracks) where the old clamped
+    formula yielded 2, so a floor of 3 would now be MET and the zero-allocation
+    path this test exists to cover would never be taken. The budget floors at
+    3, so any reachable threshold must sit above it."""
     b = _joint_only_bundle()
     out = select_multi_artist_piers(
         bundle=b, artist_names=["A", "B"],
         style_cfg=ArtistStyleConfig(enabled=True, pier_bridgeability_enabled=False),
-        ma_cfg=MultiArtistConfig(joint_pier_min_budget=3),
+        ma_cfg=MultiArtistConfig(joint_pier_min_budget=5),
         track_count=10, max_artist_fraction=0.3,
     )
     assert isinstance(out, MultiArtistPiers)
@@ -1346,14 +1398,18 @@ def test_medoid_top_k_predicted_from_post_filter_count_not_pre_filter():
         out = select_multi_artist_piers(
             bundle=b, artist_names=["A", "B"],
             style_cfg=ArtistStyleConfig(enabled=True, pier_bridgeability_enabled=False),
-            ma_cfg=MultiArtistConfig(), track_count=39, max_artist_fraction=0.125,
+            ma_cfg=MultiArtistConfig(), track_count=39, max_artist_fraction=0.18,
             min_pier_duration_seconds=46,
         )
     assert isinstance(out, MultiArtistPiers), "B alone must still seat piers"
-    # want_A = 4 (total_pier_budget(39, 0.125, 2) = 7; divmod(7, 2) = (3, 1),
+    # want_A = 4 (total_pier_budget(39, 0.18, 2) = 7; divmod(7, 2) = (3, 1),
     # first chip gets the remainder -> A=4, B=3). Correct post-filter
     # medoid_top_k = ceil(4 / 3) = 2; the pre-fix bug predicted from the raw
     # 30-track bucket (k=4) -> ceil(4 / 4) = 1.
+    # The fraction is 0.18 (not 0.125) so want_A stays 4 under the 2026-08-10
+    # total-share budget -- at 0.125 the total is 5, want_A drops to 3, and
+    # ceil(3/3) == ceil(3/4) == 1 makes this assertion unable to tell the
+    # post-filter prediction from the pre-filter bug it exists to catch.
     assert captured.get("medoid_top_k") == 2, (
         f"k_predict must use the post-filter (20-track) count, not the raw "
         f"(30-track) one -- got medoid_top_k={captured.get('medoid_top_k')}"

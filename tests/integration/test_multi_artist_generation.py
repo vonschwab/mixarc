@@ -893,7 +893,7 @@ def test_dispatched_pier_order_matches_order_with_alternations_own_decision():
             f"select_multi_artist_piers must have returned None/raised instead "
             f"of a real blend; this test needs the real orchestrator to run"
         )
-        decided_order, _improved, decided_alt, _max_alt = captured["result"]
+        decided_order, _improved, decided_alt, max_alt = captured["result"]
         group_of_index = captured["group_of_index"]
 
         bundle = load_artifact_bundle(str(ART), sonic_variant_override="muq")
@@ -917,10 +917,19 @@ def test_dispatched_pier_order_matches_order_with_alternations_own_decision():
             f"should be structurally impossible"
         )
         if names == [VEGYN, BMSR]:
-            assert dispatched_alt >= 5, (
-                f"Vegyn + Black Moth Super Rainbow is the exact reproduction "
-                f"of the finding-1 defect (previously forced 5/5, silently "
-                f"degraded to 2/5 by the post-hoc reorder) -- got {dispatched_alt}/5"
+            # Assert MAXIMAL interleaving, not a hardcoded count. The finding-1
+            # defect showed up as alternation falling BELOW what was achievable
+            # (forced 5/5 -> a dispatched 2/5), so "== max_alt" is the invariant
+            # that actually catches it. The literal 5 was an artifact of this
+            # blend seating 6 piers; since the 2026-08-10 total-share budget the
+            # same pairing at the config default seats 4 (12.5% of 30 tracks),
+            # making perfect interleaving 3/3 -- a hardcoded 5 would fail a
+            # playlist that is in fact flawlessly alternated.
+            assert dispatched_alt == max_alt, (
+                f"Vegyn + Black Moth Super Rainbow is the exact reproduction of "
+                f"the finding-1 defect (forced interleaving silently discarded by "
+                f"a post-hoc reorder) -- got {dispatched_alt}/{max_alt} across "
+                f"{len(dispatched_indices)} piers"
             )
 
 
