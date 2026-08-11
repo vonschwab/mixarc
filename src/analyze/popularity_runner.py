@@ -71,13 +71,19 @@ def get_artist_top_tracks_cached(db_path: str, artist_key: str) -> List[dict]:
 
 
 def resolve_top_tracks_to_rank(
-    top_tracks: List[dict], local_tracks: List[dict]
+    top_tracks: List[dict], local_tracks: List[dict],
+    live_album_keys: Optional[frozenset] = None,
 ) -> Dict[str, int]:
     """Map one artist's ranked Last.fm top tracks to local track_ids -> 0-based rank.
 
     mbid-first, else loose-normalized-title grouping with version-preference
     (studio/remaster beat live/demo/alt). On collision keep the LOWER rank (more
     popular). Returns {track_id: 0-based Last.fm rank}.
+
+    `live_album_keys` (normalized album keys from a manually-marked live album,
+    see `src.playlist.live_albums`) is threaded straight into version preference
+    for every candidate -- single-artist callers only, all `local_tracks` here
+    belong to one artist.
     """
     if not top_tracks or not local_tracks:
         return {}
@@ -87,12 +93,12 @@ def resolve_top_tracks_to_rank(
     )
 
     def _preference(lt: dict) -> tuple:
-        return (
-            calculate_version_preference_score(
-                str(lt.get("title") or ""), str(lt.get("album") or "")
-            ),
-            str(lt["track_id"]),
+        title = str(lt.get("title") or "")
+        album = str(lt.get("album") or "")
+        score = calculate_version_preference_score(
+            title, album, live_album_keys=live_album_keys
         )
+        return (score, str(lt["track_id"]))
 
     by_mbid: Dict[str, dict] = {}
     by_norm: Dict[str, List[dict]] = {}
@@ -130,7 +136,8 @@ def resolve_top_tracks_to_rank(
 
 
 def resolve_top_tracks_to_popularity(
-    top_tracks: List[dict], local_tracks: List[dict]
+    top_tracks: List[dict], local_tracks: List[dict],
+    live_album_keys: Optional[frozenset] = None,
 ) -> Dict[str, float]:
     """track_id -> popularity in [0,1] (= 1 - rank/N). See resolve_top_tracks_to_rank."""
     if not top_tracks:
@@ -138,7 +145,9 @@ def resolve_top_tracks_to_popularity(
     n = len(top_tracks)
     return {
         tid: 1.0 - rank / n
-        for tid, rank in resolve_top_tracks_to_rank(top_tracks, local_tracks).items()
+        for tid, rank in resolve_top_tracks_to_rank(
+            top_tracks, local_tracks, live_album_keys=live_album_keys
+        ).items()
     }
 
 
@@ -195,9 +204,11 @@ def log_seed_popularity(
     isn't on the list. Never raises.
     """
     from src.string_utils import normalize_artist_key
+    from src.playlist.live_albums import get_active_registry
 
+    artist_key = normalize_artist_key(artist_name)
     try:
-        top = get_artist_top_tracks_cached(db_path, normalize_artist_key(artist_name))
+        top = get_artist_top_tracks_cached(db_path, artist_key)
     except Exception:  # diagnostics must never break generation
         top = []
     if not top:
@@ -219,7 +230,8 @@ def log_seed_popularity(
         }
         for i, (tid, title) in enumerate(zip(pier_track_ids, pier_titles))
     ]
-    ranks = resolve_top_tracks_to_rank(top, local)
+    live_keys = get_active_registry().album_keys_for(artist_key)
+    ranks = resolve_top_tracks_to_rank(top, local, live_album_keys=live_keys)
     logger.info(
         "Popular Seeds: %d/%d piers on %s's Last.fm top-%d (#1 = most popular):",
         len(ranks), len(pier_track_ids), artist_name, n,
@@ -262,8 +274,11 @@ def build_popularity_sidecar(
     pos = {t: i for i, t in enumerate(tids)}
     popularity = np.full(len(tids), np.nan, dtype=np.float32)
 
+    from src.playlist.live_albums import get_active_registry
+
     by_artist = _local_tracks_by_artist(metadata_db, min_artist_tracks)
     cached = cached_artist_keys(enrichment_db)
+    live_registry = get_active_registry()
     matched = artists_resolved = 0
     for artist_key, local_tracks in by_artist.items():
         if artist_key not in cached:
@@ -272,7 +287,10 @@ def build_popularity_sidecar(
         if not top:
             continue
         artists_resolved += 1
-        for tid, score in resolve_top_tracks_to_popularity(top, local_tracks).items():
+        live_keys = live_registry.album_keys_for(artist_key)
+        for tid, score in resolve_top_tracks_to_popularity(
+            top, local_tracks, live_album_keys=live_keys
+        ).items():
             j = pos.get(tid)
             if j is not None:
                 popularity[j] = score
@@ -303,6 +321,8 @@ def load_artist_popularity_values(
         _artist_indices_in_bundle, _dedupe_artist_indices, _load_albums_for_indices,
     )
     from src.string_utils import normalize_artist_key
+    from src.playlist.artist_aliases import resolve_alias, alias_group_member_names
+    from src.playlist.live_albums import get_active_registry
 
     indices = _artist_indices_in_bundle(
         bundle, artist_name, include_collaborations=include_collaborations)
@@ -312,13 +332,20 @@ def load_artist_popularity_values(
     # Album is needed so version-preference can demote a clean-titled track on a live
     # album (e.g. "Corpse Pose" on "Live Leaves") below the studio version.
     _albums = _load_albums_for_indices(bundle, indices, metadata_db_path) if metadata_db_path else {}
+    # Alias-resolved key (matches _artist_indices_in_bundle's own resolution), used
+    # for BOTH the dedup below and the resolver call further down -- they must see
+    # the same manual live marks or the "same canonical version" invariant in the
+    # comment below breaks for a marked artist.
+    resolved = resolve_alias(normalize_artist_key(artist_name))
+    live_keys = get_active_registry().album_keys_for(resolved)
     # Resolve popularity against the SAME canonical (deduped) versions the piers come from,
     # using the identical dedup as cluster_artist_tracks. Otherwise, when a song has two
     # equally-preferred versions (e.g. two studio "Corpse Pose" copies on different albums),
     # the resolver's tie-break can land the #1 score on a version the dedup discarded — so the
     # hit carries no score on the surviving version and vanishes from the 🔥 piers.
     canonical_indices = _dedupe_artist_indices(
-        indices, titles, getattr(bundle, "durations_ms", None), _albums
+        indices, titles, getattr(bundle, "durations_ms", None), _albums,
+        live_album_keys=live_keys,
     )
     local_tracks = [{
         "track_id": str(bundle.track_ids[i]),
@@ -326,15 +353,13 @@ def load_artist_popularity_values(
         "musicbrainz_id": "",
         "album": _albums.get(i, ""),
     } for i in canonical_indices]
-    from src.playlist.artist_aliases import resolve_alias, alias_group_member_names
-    resolved = resolve_alias(normalize_artist_key(artist_name))
     names = alias_group_member_names(resolved) or [artist_name]
     top: list = []
     for nm in names:
         top.extend(get_artist_top_tracks_cached_or_fetch(
             normalize_artist_key(nm), nm, client=client, db_path=db_path,
             limit=limit, max_age_days=max_age_days, now_iso=now_iso))
-    pop = resolve_top_tracks_to_popularity(top, local_tracks)
+    pop = resolve_top_tracks_to_popularity(top, local_tracks, live_album_keys=live_keys)
     if not pop:
         return None
     out = np.full(len(bundle.track_ids), np.nan, dtype=float)
@@ -388,12 +413,14 @@ def load_pool_popularity_values(
             rows_by_key.setdefault(k, []).append(i)
     # Albums so version preference demotes clean-titled live-album tracks.
     from src.playlist.artist_style import _load_albums_for_indices
+    from src.playlist.live_albums import get_active_registry
     _albums = (
         _load_albums_for_indices(
             bundle, [i for idxs in rows_by_key.values() for i in idxs], metadata_db_path
         )
         if metadata_db_path else {}
     )
+    live_registry = get_active_registry()
     for key, idxs in rows_by_key.items():
         try:
             top = get_artist_top_tracks_cached_or_fetch(
@@ -409,7 +436,9 @@ def load_pool_popularity_values(
             "musicbrainz_id": "",
             "album": _albums.get(i, ""),
         } for i in idxs]
-        ranks = resolve_top_tracks_to_rank(top, local)
+        ranks = resolve_top_tracks_to_rank(
+            top, local, live_album_keys=live_registry.album_keys_for(key)
+        )
         n = len(top)
         pos = {str(track_ids[i]): i for i in idxs}
         for tid, rank in ranks.items():
@@ -436,7 +465,9 @@ def load_pool_popularity_values_cached(
         return out
     # Album so version-preference demotes clean-titled live-album tracks (e.g. "Live Leaves").
     from src.playlist.artist_style import _load_albums_for_indices
+    from src.playlist.live_albums import get_active_registry
     _albums = _load_albums_for_indices(bundle, [int(i) for i in pool_indices], metadata_db_path) if metadata_db_path else {}
+    live_registry = get_active_registry()
     rows_by_key: Dict[str, List[int]] = {}
     for i in pool_indices:
         i = int(i)
@@ -454,7 +485,9 @@ def load_pool_popularity_values_cached(
             "musicbrainz_id": "",
             "album": _albums.get(i, ""),
         } for i in idxs]
-        ranks = resolve_top_tracks_to_rank(top, local)
+        ranks = resolve_top_tracks_to_rank(
+            top, local, live_album_keys=live_registry.album_keys_for(key)
+        )
         n = len(top)
         pos = {str(track_ids[i]): i for i in idxs}
         for tid, rank in ranks.items():
@@ -482,7 +515,9 @@ def load_pool_popularity_ranks_cached(
         return out
     # Album so version-preference demotes clean-titled live-album tracks (e.g. "Live Leaves").
     from src.playlist.artist_style import _load_albums_for_indices
+    from src.playlist.live_albums import get_active_registry
     _albums = _load_albums_for_indices(bundle, [int(i) for i in pool_indices], metadata_db_path) if metadata_db_path else {}
+    live_registry = get_active_registry()
     rows_by_key: Dict[str, List[int]] = {}
     for i in pool_indices:
         i = int(i)
@@ -500,7 +535,9 @@ def load_pool_popularity_ranks_cached(
             "musicbrainz_id": "",
             "album": _albums.get(i, ""),
         } for i in idxs]
-        ranks = resolve_top_tracks_to_rank(top, local)
+        ranks = resolve_top_tracks_to_rank(
+            top, local, live_album_keys=live_registry.album_keys_for(key)
+        )
         pos = {str(track_ids[i]): i for i in idxs}
         for tid, rank in ranks.items():
             j = pos.get(tid)

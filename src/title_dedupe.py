@@ -331,7 +331,9 @@ def _is_bootleg_album_name(album_lower: str) -> bool:
     )
 
 
-def calculate_version_preference_score(title: str, album: str = "") -> int:
+def calculate_version_preference_score(
+    title: str, album: str = "", live_album_keys: Optional[frozenset] = None
+) -> int:
     """
     Calculate a preference score for a track version.
     Higher score = more preferred (canonical/album version).
@@ -343,6 +345,12 @@ def calculate_version_preference_score(title: str, album: str = "") -> int:
         album: Album/release name (optional). Many live recordings carry a CLEAN
             track title — the live-ness lives in the album ("MTV Unplugged",
             "Live at Reading") — so the album is penalized for live markers too.
+        live_album_keys: Optional set of normalized album keys (see
+            ``src.metadata_client._normalize_album_key``) that a user has manually
+            marked live via the live-albums registry (``src.playlist.live_albums``).
+            Folded into the SAME album_is_live decision as keyword/date detection
+            so the -30 penalty applies once, never stacking with the automatic
+            detector.
 
     Returns:
         Preference score (higher = more canonical)
@@ -353,13 +361,20 @@ def calculate_version_preference_score(title: str, album: str = "") -> int:
     # Album-based live detection: catches live recordings with clean track titles.
     # A standalone "live" word (\blive\b) catches live albums named "Live <X>"
     # (e.g. Unwound "Live Leaves") that match none of the phrase markers, while NOT
-    # firing on substrings like "Alive"/"Olive"/"Deliver".
+    # firing on substrings like "Alive"/"Olive"/"Deliver". A manual mark from the
+    # live-albums registry (live_album_keys) is folded into this SAME decision --
+    # not a second penalty -- so a keyword-detected AND manually-marked album still
+    # scores -30 once, never -60.
     album_lower = str(album or "").lower()
-    if (
+    album_is_live = bool(
         re.search(r"\blive\b", album_lower)
         or any(m in album_lower for m in _LIVE_ALBUM_MARKERS)
         or _is_bootleg_album_name(album_lower)
-    ):
+    )
+    if not album_is_live and live_album_keys:
+        from src.metadata_client import _normalize_album_key
+        album_is_live = _normalize_album_key(album) in live_album_keys
+    if album_is_live:
         score -= 30
 
     # Penalize version indicators

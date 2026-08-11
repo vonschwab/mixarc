@@ -652,8 +652,10 @@ def build_pier_bridge_playlist(
     logger.info("Pier+Bridge: %d seeds, target %d tracks", num_seeds, total_tracks)
 
     # Deduplicate candidate pool by artist+title
+    from src.playlist.live_albums import get_active_registry
     deduped_pool, _ = _dedupe_candidate_pool(
-        candidate_pool_indices, bundle, albums_by_index=albums_by_index
+        candidate_pool_indices, bundle, albums_by_index=albums_by_index,
+        live_registry=get_active_registry(),
     )
 
     # Exclude seed indices from candidate pool

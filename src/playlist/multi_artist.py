@@ -1438,6 +1438,7 @@ def select_multi_artist_piers(
                 bundle, g.indices, style_cfg,
                 min_pier_duration_seconds=min_pier_duration_seconds,
                 metadata_db_path=metadata_db_path,
+                artist_name=g.label,
             ),
             style_cfg,
         ))

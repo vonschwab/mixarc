@@ -16,6 +16,7 @@ from typing import Dict, List, Optional, Tuple
 
 from src.features.artifacts import ArtifactBundle
 from src.playlist.identity_keys import identity_keys_for_index
+from src.playlist.live_albums import LiveAlbumRegistry
 from src.title_dedupe import calculate_version_preference_score
 
 logger = logging.getLogger(__name__)
@@ -99,11 +100,15 @@ def dedupe_pool_by_track_key(
     bundle: ArtifactBundle,
     pool_indices: List[int],
     albums_by_index: Optional[Dict[int, str]] = None,
+    live_registry: Optional[LiveAlbumRegistry] = None,
 ) -> List[int]:
     """Group candidate-pool indices by (artist, normalized title) track key,
     keep the canonical version per group (highest version-preference score).
 
-    No-op when ``bundle.track_titles is None``.
+    No-op when ``bundle.track_titles is None``. This pool is multi-artist, so
+    `live_registry` is narrowed PER ROW via that row's own artist_key -- a mark
+    on one seed artist's album must never penalize another artist's same-named
+    album.
     """
     if bundle.track_titles is None:
         return list(pool_indices)
@@ -121,10 +126,14 @@ def dedupe_pool_by_track_key(
         # Score each candidate for version preference; higher wins.
         best_idx = indices[0]
         best_score = -1
+        # key == (artist_key, title_key) -- key[0] is this group's artist_key already.
+        live_keys = live_registry.album_keys_for(key[0]) if live_registry else None
         for idx in indices:
             title = str(bundle.track_titles[idx]) if bundle.track_titles is not None else ""
             album = (albums_by_index or {}).get(int(idx), "")
-            score = calculate_version_preference_score(title, album)
+            score = calculate_version_preference_score(
+                title, album, live_album_keys=live_keys
+            )
             if score > best_score:
                 best_score = score
                 best_idx = idx

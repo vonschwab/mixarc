@@ -21,6 +21,7 @@ import numpy as np
 
 from src.features.artifacts import ArtifactBundle
 from src.playlist.identity_keys import identity_keys_for_index
+from src.playlist.live_albums import LiveAlbumRegistry
 from src.playlist.pier_bridge.audit_summary import _compute_bridgeability_score
 
 logger = logging.getLogger(__name__)
@@ -174,12 +175,16 @@ def _dedupe_candidate_pool(
     pool_indices: List[int],
     bundle: ArtifactBundle,
     albums_by_index: Optional[Dict[int, str]] = None,
+    live_registry: Optional[LiveAlbumRegistry] = None,
 ) -> Tuple[List[int], Dict[str, int]]:
     """
     Deduplicate candidate pool by normalized artist+title.
     Returns deduplicated indices and mapping of norm_key -> chosen index.
 
-    Prefers canonical versions based on version preference scoring.
+    Prefers canonical versions based on version preference scoring. This pool is
+    multi-artist, so `live_registry` (rather than one flat key set) is narrowed
+    PER ROW via that row's own artist_key -- a mark on one seed artist's album
+    must never penalize another artist's same-named album.
     """
     from src.title_dedupe import calculate_version_preference_score
 
@@ -192,7 +197,10 @@ def _dedupe_candidate_pool(
         # Compute preference score (higher = more canonical)
         title = str(bundle.track_titles[idx]) if bundle.track_titles is not None else ""
         album = (albums_by_index or {}).get(int(idx), "")
-        pref_score = calculate_version_preference_score(title, album)
+        live_keys = live_registry.album_keys_for(keys.artist_key) if live_registry else None
+        pref_score = calculate_version_preference_score(
+            title, album, live_album_keys=live_keys
+        )
 
         if key not in seen or pref_score > seen[key][1]:
             seen[key] = (idx, pref_score)

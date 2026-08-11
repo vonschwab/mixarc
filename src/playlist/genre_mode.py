@@ -251,7 +251,9 @@ def canonicity_by_index(bundle, member_indices, popularity_db_path: str) -> dict
     from src.analyze.popularity_runner import (
         get_artist_top_tracks_cached, resolve_top_tracks_to_rank,
     )
+    from src.playlist.live_albums import get_active_registry
 
+    live_registry = get_active_registry()
     by_artist: dict[str, list] = {}
     for i in member_indices:
         by_artist.setdefault(str(bundle.artist_keys[i]), []).append(int(i))
@@ -264,7 +266,14 @@ def canonicity_by_index(bundle, member_indices, popularity_db_path: str) -> dict
             {"track_id": str(bundle.track_ids[i]),
              "title": str(bundle.track_titles[i])} for i in idxs
         ]
-        ranks = resolve_top_tracks_to_rank(top, local)
+        # live_album_keys is threaded for coverage/consistency, but it is INERT here:
+        # `local` above carries no "album" field (this site is title-only), and
+        # calculate_version_preference_score's manual-mark check only fires when an
+        # album is supplied. Ranks canonicity within one artist; gains nothing from
+        # the mark until albums are threaded through this site too.
+        ranks = resolve_top_tracks_to_rank(
+            top, local, live_album_keys=live_registry.album_keys_for(artist_key)
+        )
         n = max(1, len(top))
         id_to_index = {str(bundle.track_ids[i]): i for i in idxs}
         for tid, rank in ranks.items():

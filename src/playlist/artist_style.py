@@ -417,6 +417,7 @@ def _post_filter_eligible_count(
     *,
     min_pier_duration_seconds: Optional[int] = DEFAULT_MIN_TRACK_DURATION_SECONDS,
     metadata_db_path: Optional[str] = None,
+    artist_name: Optional[str] = None,
 ) -> int:
     """The eligible-candidate count ``cluster_artist_tracks`` will actually
     cluster over for this exact member set, after the same duration gate +
@@ -434,6 +435,12 @@ def _post_filter_eligible_count(
     never drift out of step with what clustering will actually see. Quiet by
     construction -- this is a prediction-only pass, not the real run.
 
+    ``artist_name``, like ``cluster_artist_tracks``'s own parameter of the same
+    name, may degrade to a cross-artist group label rather than a real artist
+    (multi-artist blend groups) -- live-mark lookup is then a best-effort miss
+    (no artist keyed under that label), not wrong, since an unrecognized key
+    simply resolves to no marks via ``LiveAlbumRegistry.album_keys_for``.
+
     Deliberately does not replicate ``restrict_to_track_ids`` or
     ``excluded_track_ids`` filtering: no current caller of this helper passes
     either to the matching ``cluster_artist_tracks`` call it predicts for.
@@ -448,9 +455,15 @@ def _post_filter_eligible_count(
             _load_albums_for_indices(bundle, indices, metadata_db_path)
             if metadata_db_path else None
         )
+        live_keys = None
+        if artist_name:
+            from src.playlist.live_albums import get_active_registry
+            live_keys = get_active_registry().album_keys_for(
+                normalize_artist_key(artist_name)
+            )
         indices = _dedupe_artist_indices(
             indices, getattr(bundle, "track_titles", None), bundle.durations_ms,
-            albums_by_index,
+            albums_by_index, live_album_keys=live_keys,
         )
     return len(indices)
 
@@ -491,6 +504,7 @@ def _dedupe_artist_indices(
     track_titles: Optional[Sequence[str]],
     durations_ms: Optional[np.ndarray],
     albums_by_index: Optional[Dict[int, str]] = None,
+    live_album_keys: Optional[frozenset] = None,
 ) -> List[int]:
     """Reduce an artist's track indices to one canonical version per song.
 
@@ -498,7 +512,9 @@ def _dedupe_artist_indices(
     keeps the highest version-preference version per song (studio/remaster beat
     live/demo/alt; remaster is barely penalized). `albums_by_index` (track index ->
     album name) lets version-preference catch album-based live recordings with
-    clean titles ("Polly" on "MTV Unplugged"). Ties break to the longer duration,
+    clean titles ("Polly" on "MTV Unplugged"). `live_album_keys` (normalized album
+    keys from a manually-marked live album, see `src.playlist.live_albums`) folds
+    into the same version-preference decision. Ties break to the longer duration,
     then the lower index, for determinism. A live cut survives only if it is the
     song's sole version. Tracks with no usable title pass through unchanged.
     Returns indices sorted ascending.
@@ -523,7 +539,9 @@ def _dedupe_artist_indices(
     def _rank(i: int) -> tuple:
         title = str(track_titles[i]) if track_titles[i] is not None else ""
         album = albums_by_index.get(i, "") if albums_by_index else ""
-        score = calculate_version_preference_score(title, album)
+        score = calculate_version_preference_score(
+            title, album, live_album_keys=live_album_keys
+        )
         dur = float(durations_ms[i]) if durations_ms is not None else 0.0
         return (score, dur, -i)  # highest score, then longest, then stable
 
@@ -1098,9 +1116,16 @@ def cluster_artist_tracks(
             _load_albums_for_indices(bundle, artist_indices, metadata_db_path)
             if metadata_db_path else None
         )
+        # artist_name may be a cross-artist group label (member_indices case, see
+        # note above) rather than a real artist -- album_keys_for on an
+        # unrecognized key just returns no marks, so this degrades harmlessly.
+        from src.playlist.live_albums import get_active_registry
+        live_keys = get_active_registry().album_keys_for(
+            normalize_artist_key(artist_name)
+        )
         artist_indices = _dedupe_artist_indices(
             artist_indices, getattr(bundle, "track_titles", None), bundle.durations_ms,
-            albums_by_index,
+            albums_by_index, live_album_keys=live_keys,
         )
         if before != len(artist_indices):
             logger.info(

@@ -1004,8 +1004,10 @@ def generate_playlist_ds(
                     "titles will not be caught).",
                     _meta_db,
                 )
+            from src.playlist.live_albums import get_active_registry
             pool_indices = dedupe_pool_by_track_key(
-                bundle, pool_indices, albums_by_index=_pool_albums
+                bundle, pool_indices, albums_by_index=_pool_albums,
+                live_registry=get_active_registry(),
             )
 
             audit.ensure_context(
@@ -1310,8 +1312,10 @@ def generate_playlist_ds(
                             "retry (live albums with clean titles will not be caught).",
                             _meta_db,
                         )
+                    from src.playlist.live_albums import get_active_registry
                     retry_pool_indices = dedupe_pool_by_track_key(
-                        bundle, retry_pool_indices, albums_by_index=_pool_albums
+                        bundle, retry_pool_indices, albums_by_index=_pool_albums,
+                        live_registry=get_active_registry(),
                     )
                     retry_result = _run_pier_bridge(retry_pool_indices)
                     summary["candidate_pool_indices_after_dedupe"] = int(len(retry_pool_indices))
