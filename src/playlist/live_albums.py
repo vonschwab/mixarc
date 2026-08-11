@@ -204,7 +204,10 @@ def compute_live_ban(metadata_db_path: str, registry: LiveAlbumRegistry) -> Live
         artists_with_marks = {
             normalize_artist_key(str(e.get("artist") or "")) for e in registry.entries
         }
-        matched_keys: set = set()
+        matched_keys: set = set()  # {(artist_key, album_key)} -- keep per-artist,
+        # never a bare album-key set: two artists marking identically-named
+        # albums (e.g. both "Live") must not let one's real match suppress
+        # the other's genuinely-unmatched warning (xhigh review, 2026-08-11).
         for ak in sorted(k for k in artists_with_marks if k):
             live_keys = registry.album_keys_for(ak)
             rows = conn.execute(
@@ -219,13 +222,17 @@ def compute_live_ban(metadata_db_path: str, registry: LiveAlbumRegistry) -> Live
                 live_v = [v for v in versions if _normalize_album_key(v[2]) in live_keys]
                 nonlive_v = [v for v in versions if _normalize_album_key(v[2]) not in live_keys]
                 if live_v:
-                    matched_keys.update(_normalize_album_key(v[2]) for v in live_v)
+                    matched_keys.update((ak, _normalize_album_key(v[2])) for v in live_v)
                 if live_v and nonlive_v:
                     banned.update(tid for tid, _t, _a in live_v)
                 elif live_v:
                     rescued.extend((ak, t) for _tid, t, _a in live_v)
         for e in registry.entries:
-            if _normalize_album_key(str(e.get("album") or "")) not in matched_keys:
+            e_key = (
+                normalize_artist_key(str(e.get("artist") or "")),
+                _normalize_album_key(str(e.get("album") or "")),
+            )
+            if e_key not in matched_keys:
                 unmatched.append(dict(e))
         conn.close()
     except Exception as exc:  # never gate generation

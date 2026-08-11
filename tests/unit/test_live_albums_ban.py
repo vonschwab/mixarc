@@ -51,3 +51,23 @@ def test_empty_registry_is_free(tmp_path):
     db = _db(tmp_path, [("t1", "Song", "Album", "a")])
     res = compute_live_ban(db, EMPTY_REGISTRY)
     assert res.banned_track_ids == set() and not res.rescued and not res.unmatched_entries
+
+
+def test_unmatched_warning_not_suppressed_by_other_artists_same_album_name(tmp_path, caplog):
+    """Two artists mark albums with the SAME normalized name; only one exists in
+    the library. The other's entry must still warn."""
+    import logging
+    from src.playlist.live_albums import build_registry, compute_live_ban
+    reg = build_registry([
+        {"artist": "Artist A", "album": "Live"},
+        {"artist": "Artist B", "album": "Live"},
+    ])
+    db = _db(tmp_path, [
+        ("t1", "Song", "Live", "artist a"),
+        ("t2", "Song", "Studio", "artist a"),
+    ])
+    with caplog.at_level(logging.WARNING, logger="src.playlist.live_albums"):
+        res = compute_live_ban(db, reg)
+    assert res.banned_track_ids == {"t1"}
+    assert any("Artist B" in r.getMessage() for r in caplog.records), "B's entry matched nothing and must warn"
+    assert not any("Artist A" in r.getMessage() and "NO library tracks" in r.getMessage() for r in caplog.records)

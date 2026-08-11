@@ -781,7 +781,10 @@ class PlaylistGenerator:
                     logger.info(
                         "Live ban: excluded %d track(s) across %d marked album(s); rescued %d live-only song(s)",
                         len(_ban.banned_track_ids),
-                        len({e.get("album") for e in get_active_registry().entries}),
+                        len({
+                            (str(e.get("artist") or ""), str(e.get("album") or ""))
+                            for e in get_active_registry().entries
+                        }),
                         len(_ban.rescued),
                     )
                 blacklist_ids = set(blacklist_ids) | _ban.banned_track_ids
