@@ -177,3 +177,63 @@ def set_live_albums_for_testing(entries_or_none) -> None:
 
 def clear_cache() -> None:
     _cached_load.cache_clear()
+
+
+@dataclass
+class LiveBanResult:
+    banned_track_ids: set
+    rescued: list          # [(artist_key, title)]
+    unmatched_entries: list
+
+
+def compute_live_ban(metadata_db_path: str, registry: LiveAlbumRegistry) -> LiveBanResult:
+    """Song-scoped ban: a marked track is banned only if the SAME artist_key owns
+    the same loose-normalized title on a non-live album. Read-only DB access.
+    Never raises — a failed query returns an empty (inert) result."""
+    import sqlite3
+
+    from src.title_dedupe import normalize_title_for_dedupe
+
+    banned: set = set()
+    rescued: list = []
+    unmatched: list = []
+    if not registry.entries:
+        return LiveBanResult(banned, rescued, unmatched)
+    try:
+        conn = sqlite3.connect(f"file:{metadata_db_path}?mode=ro", uri=True)
+        artists_with_marks = {
+            normalize_artist_key(str(e.get("artist") or "")) for e in registry.entries
+        }
+        matched_keys: set = set()
+        for ak in sorted(k for k in artists_with_marks if k):
+            live_keys = registry.album_keys_for(ak)
+            rows = conn.execute(
+                "SELECT track_id, title, album FROM tracks WHERE artist_key = ?", (ak,)
+            ).fetchall()
+            by_title: Dict[str, list] = {}
+            for tid, title, album in rows:
+                norm = normalize_title_for_dedupe(str(title or ""), mode="loose")
+                if norm:
+                    by_title.setdefault(norm, []).append((str(tid), str(title or ""), str(album or "")))
+            for norm, versions in by_title.items():
+                live_v = [v for v in versions if _normalize_album_key(v[2]) in live_keys]
+                nonlive_v = [v for v in versions if _normalize_album_key(v[2]) not in live_keys]
+                if live_v:
+                    matched_keys.update(_normalize_album_key(v[2]) for v in live_v)
+                if live_v and nonlive_v:
+                    banned.update(tid for tid, _t, _a in live_v)
+                elif live_v:
+                    rescued.extend((ak, t) for _tid, t, _a in live_v)
+        for e in registry.entries:
+            if _normalize_album_key(str(e.get("album") or "")) not in matched_keys:
+                unmatched.append(dict(e))
+        conn.close()
+    except Exception as exc:  # never gate generation
+        logger.warning("live_albums: ban computation failed (%s) — no tracks banned", exc)
+        return LiveBanResult(set(), [], [])
+    for e in unmatched:
+        logger.warning(
+            "live_albums: entry matches NO library tracks (typo?): artist=%r album=%r",
+            e.get("artist"), e.get("album"),
+        )
+    return LiveBanResult(banned, rescued, unmatched)

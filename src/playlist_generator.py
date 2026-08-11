@@ -767,6 +767,25 @@ class PlaylistGenerator:
                     logger.debug("No anchor seeds resolved by title+artist match")
 
             blacklist_ids = self._get_blacklisted_track_ids()
+
+            # Live-album ban (song-scoped; live-only songs rescued). Separate
+            # set + its own log line so it can never quietly shrink the library.
+            _exclude_live = bool(
+                ((self.config.get("playlists", "ds_pipeline", default={}) or {})
+                 .get("candidate_pool", {}) or {}).get("exclude_live_albums", True)
+            )
+            if _exclude_live:
+                from src.playlist.live_albums import compute_live_ban, get_active_registry
+                _ban = compute_live_ban(resolve_database_path(self.config), get_active_registry())
+                if _ban.banned_track_ids or _ban.rescued:
+                    logger.info(
+                        "Live ban: excluded %d track(s) across %d marked album(s); rescued %d live-only song(s)",
+                        len(_ban.banned_track_ids),
+                        len({e.get("album") for e in get_active_registry().entries}),
+                        len(_ban.rescued),
+                    )
+                blacklist_ids = set(blacklist_ids) | _ban.banned_track_ids
+
             if blacklist_ids:
                 if str(seed_to_use) in blacklist_ids:
                     logger.warning(
