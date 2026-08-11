@@ -200,6 +200,13 @@ export default function App() {
     } catch (e) { setError(friendlyError(e)); }
   }, []);
 
+  const handleMarkAlbumLive = useCallback(async (t: MenuTarget) => {
+    setMenuOpen(false);
+    try {
+      await api.setLiveAlbum({ artist: t.track.artist, album: t.track.album, enabled: true });
+    } catch (e) { setError(friendlyError(e)); }
+  }, []);
+
   const handleReplace = useCallback((t: MenuTarget) => {
     setMenuOpen(false);
     setReplacePos(t.index);
@@ -421,6 +428,7 @@ export default function App() {
         onBlacklistTrack={handleBlacklistTrack}
         onBlacklistAlbum={handleBlacklistAlbum}
         onBlacklistArtist={handleBlacklistArtist}
+        onMarkAlbumLive={handleMarkAlbumLive}
         onEditGenres={handleEditGenres}
       />
       <ReplaceDialog

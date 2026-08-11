@@ -16,6 +16,7 @@ export interface TrackContextMenuProps {
   onBlacklistTrack: (t: MenuTarget) => void;
   onBlacklistAlbum: (t: MenuTarget) => void;
   onBlacklistArtist: (t: MenuTarget) => void;
+  onMarkAlbumLive: (t: MenuTarget) => void;
   onEditGenres: (t: MenuTarget) => void;
 }
 
@@ -50,6 +51,9 @@ export function TrackContextMenu(props: TrackContextMenuProps) {
               </DropdownMenu.Item>
               <DropdownMenu.Item className={item} onSelect={() => props.onBlacklistArtist(t)}>
                 Blacklist Artist: {t.track.artist}
+              </DropdownMenu.Item>
+              <DropdownMenu.Item className={item} onSelect={() => props.onMarkAlbumLive(t)}>
+                Mark album as live
               </DropdownMenu.Item>
               <DropdownMenu.Separator className="h-px bg-border my-1" />
               <DropdownMenu.Item className={item} onSelect={() => props.onEditGenres(t)}>

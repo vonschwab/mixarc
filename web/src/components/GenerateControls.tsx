@@ -110,6 +110,7 @@ export function GenerateControls({
   const [recencyPlays, setRecencyPlays] = useLocalStorage("pg_recency_plays", 1);
   const [excludeRecentSeeds, setExcludeRecentSeeds] = useLocalStorage("pg_exclude_recent_seeds", false);
   const [instrumental, setInstrumental] = useLocalStorage("pg_instrumental", false);
+  const [excludeLive, setExcludeLive] = useLocalStorage("pg_exclude_live", true);
   const [artistSpacing, setArtistSpacing] = useLocalStorage("pg_artist_spacing", "normal");
   const [diversityLevel, setDiversityLevel] = useLocalStorage("pg_diversity_level", 2);
 
@@ -327,6 +328,7 @@ export function GenerateControls({
       recency_plays_threshold: recencyPlays,
       exclude_seed_tracks_from_recency: excludeRecentSeeds,
       instrumental: instrumental,
+      exclude_live: excludeLive,
       artist_spacing: artistSpacing,
       diversity_gamma: DIVERSITY_GAMMAS[diversityLevel],
       artist_diversity_mode: diversityLevel === DIVERSITY_GAMMAS.length - 1 ? "one_per_artist" : "weighted",
@@ -748,6 +750,19 @@ export function GenerateControls({
               className="accent-accent cursor-pointer"
             />
             <Lbl>instrumental</Lbl>
+          </label>
+        </Cell>
+        <Cell>
+          <label
+            className="flex items-center gap-1.5 cursor-pointer select-none"
+          >
+            <input
+              type="checkbox"
+              checked={excludeLive}
+              onChange={(e) => setExcludeLive(e.target.checked)}
+              className="accent-accent cursor-pointer"
+            />
+            <Lbl title="Keep live-marked albums out of playlists when a studio version of the song exists (live-only songs are kept). Mark albums live from a track's context menu.">exclude live</Lbl>
           </label>
         </Cell>
         <Cell>

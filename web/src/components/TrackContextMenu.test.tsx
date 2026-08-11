@@ -30,6 +30,7 @@ describe("TrackContextMenu copy", () => {
         onBlacklistTrack={noop}
         onBlacklistAlbum={noop}
         onBlacklistArtist={noop}
+        onMarkAlbumLive={noop}
         onEditGenres={noop}
       />,
     );

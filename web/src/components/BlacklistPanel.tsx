@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { friendlyError } from "../lib/errors";
 import { api } from "../lib/api";
-import type { BlacklistEntry, BlacklistFetchResponse } from "../lib/types";
+import type { BlacklistEntry, BlacklistFetchResponse, LiveAlbumEntry } from "../lib/types";
 
 const DOT: Record<string, string> = {
   artist: "var(--color-danger)",
@@ -9,8 +9,13 @@ const DOT: Record<string, string> = {
   track: "var(--color-chipText)",
 };
 
+// Live albums are a *semi*-blacklist (studio duplicates get demoted, not
+// dropped) — its own accent keeps it visually distinct from the DOT map above.
+const LIVE_DOT = "var(--color-accent)";
+
 export function BlacklistPanel() {
   const [data, setData] = useState<BlacklistFetchResponse | null>(null);
+  const [live, setLive] = useState<LiveAlbumEntry[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [q, setQ] = useState("");
@@ -21,7 +26,9 @@ export function BlacklistPanel() {
   const refresh = useCallback(async () => {
     setBusy(true);
     try {
-      setData(await api.getBlacklist());
+      const [blacklist, liveAlbums] = await Promise.all([api.getBlacklist(), api.liveAlbums()]);
+      setData(blacklist);
+      setLive(liveAlbums.entries);
       setError(null);
     } catch (e) {
       setError(friendlyError(e));
@@ -81,6 +88,17 @@ export function BlacklistPanel() {
     }
   }
 
+  async function unmarkLive(entry: LiveAlbumEntry) {
+    setBusy(true);
+    try {
+      await api.setLiveAlbum({ ...entry, enabled: false });
+      await refresh();
+    } catch (e) {
+      setError(friendlyError(e));
+      setBusy(false);
+    }
+  }
+
   const section = (title: string, entries: BlacklistEntry[]) => (
     <div>
       <div className="flex justify-between text-2xs uppercase tracking-[.08em] text-faint mt-2 mb-1">
@@ -93,6 +111,28 @@ export function BlacklistPanel() {
           <button onClick={() => remove(e)} className="text-faint hover:text-danger text-sm leading-none">×</button>
         </div>
       ))}
+    </div>
+  );
+
+  // Live albums are a *semi*-blacklist — studio duplicates get demoted, not
+  // dropped — so this section gets its own heading/accent, separated from the
+  // hard-blacklist sections above by a divider, instead of blending into `section()`.
+  const liveSection = (title: string, entries: LiveAlbumEntry[]) => (
+    <div className="mt-3 pt-2 border-t border-hairline">
+      <div className="flex justify-between text-2xs uppercase tracking-[.08em] text-accent mt-2 mb-1">
+        <span>{title}</span><span className="text-faint">{entries.length}</span>
+      </div>
+      {entries.length === 0 ? (
+        <div className="text-faint text-2xs">No albums marked live yet. Use the track table context menu.</div>
+      ) : (
+        entries.map((e, i) => (
+          <div key={`live-${i}`} className="flex items-center gap-1.5 py-0.5 border-b border-hairline">
+            <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: LIVE_DOT }} />
+            <span className="text-2xs text-muted flex-1 truncate">{e.artist} — {e.album}</span>
+            <button onClick={() => unmarkLive(e)} className="text-faint hover:text-accent text-sm leading-none">×</button>
+          </div>
+        ))
+      )}
     </div>
   );
 
@@ -133,6 +173,8 @@ export function BlacklistPanel() {
           {section("Tracks", data.tracks)}
         </>
       ) : null}
+
+      {data && liveSection("Live albums", live)}
     </div>
   );
 }
