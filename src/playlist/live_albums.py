@@ -6,6 +6,19 @@ exclude_live toggle — bans it from the candidate pool when a non-live
 version of the same song exists. Mirrors artist_aliases.py: yaml file,
 lru_cache(1) active registry, explicit clear_cache after save.
 Design: docs/superpowers/specs/2026-08-10-live-album-marking-design.md.
+
+Key normalization: the registry is MULTI-INDEXED, not single-key, because its
+callers look an entry's artist up under different key spaces:
+  - pool-dedupe sites (seeds.py, pier_resolver.py) look up by
+    `identity_keys_for_index(...).artist_key` -- ensemble-stripped/
+    alias-resolved (e.g. "Bill Evans Trio" -> "bill evans").
+  - popularity sites (popularity_runner.py) look up by plain
+    `normalize_artist_key` and, for the seed artist, by
+    `resolve_alias(...)` output (e.g. "alias_group:sigur ros").
+Each entry is therefore indexed under its plain normalized key, its
+alias-resolved key (if different), and every ensemble/participant identity
+key `resolve_artist_identity_keys` derives from it. A lookup only ever
+*acts* when the ALBUM key also matches, so extra index keys are harmless.
 """
 from __future__ import annotations
 
@@ -20,11 +33,17 @@ from typing import Dict, FrozenSet, List, Optional, Tuple
 import yaml
 
 from src.metadata_client import _normalize_album_key
+from src.playlist.artist_aliases import resolve_alias
+from src.playlist.artist_identity_resolver import (
+    ArtistIdentityConfig,
+    resolve_artist_identity_keys,
+)
 from src.string_utils import normalize_artist_key
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_PATH = Path(__file__).resolve().parents[2] / "data" / "live_albums.yaml"
+_IDENTITY_CFG = ArtistIdentityConfig(enabled=True)
 
 
 @dataclass(frozen=True)
@@ -51,10 +70,41 @@ def build_registry(entries: List[dict]) -> LiveAlbumRegistry:
         if not isinstance(e, dict):
             logger.warning("live_albums: skipping non-mapping entry: %r", e)
             continue
-        ak = normalize_artist_key(str(e.get("artist") or ""))
+        artist_raw = str(e.get("artist") or "")
         alk = _normalize_album_key(str(e.get("album") or ""))
-        if ak and alk:
-            by_artist.setdefault(ak, set()).add(alk)
+        if not alk:
+            continue
+        plain = normalize_artist_key(artist_raw)
+        keys: set = {plain} if plain else set()
+
+        # Alias-resolved key (load_artist_popularity_values looks up under this).
+        # Never let a broken/misconfigured aliases file break registry construction
+        # (the never-raise invariant governs this module) -- fall back to plain-only.
+        try:
+            resolved = resolve_alias(plain) if plain else ""
+            if resolved:
+                keys.add(resolved)
+        except Exception as exc:
+            logger.warning(
+                "live_albums: resolve_alias failed for artist %r (%s) -- "
+                "indexing plain key only", artist_raw, exc,
+            )
+
+        # Ensemble-stripped/participant identity keys (pool-dedupe sites look up
+        # under these, e.g. "Bill Evans Trio" -> "bill evans"). Same never-raise
+        # guarantee as above.
+        try:
+            for k in resolve_artist_identity_keys(artist_raw, _IDENTITY_CFG):
+                if k:
+                    keys.add(k)
+        except Exception as exc:
+            logger.warning(
+                "live_albums: resolve_artist_identity_keys failed for artist %r "
+                "(%s) -- indexing plain key only", artist_raw, exc,
+            )
+
+        for k in keys:
+            by_artist.setdefault(k, set()).add(alk)
     return LiveAlbumRegistry(
         entries=tuple(entries or []),
         _by_artist={k: frozenset(v) for k, v in by_artist.items()},

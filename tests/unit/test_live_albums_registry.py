@@ -23,7 +23,12 @@ def test_round_trip(tmp_path):
 
 def test_registry_matches_marked_album_case_insensitively():
     reg = build_registry(SMITHS)
-    assert len(reg) == 1
+    # 2, not 1: multi-indexing (xhigh review fix, 2026-08-11) also indexes the
+    # entry under its identity key. resolve_artist_identity_keys's internal
+    # normalizer strips a leading "The" (unlike the plain normalize_artist_key
+    # used for the primary key below), so "The Smiths" contributes a second,
+    # harmless "smiths" index key alongside "the smiths".
+    assert len(reg) == 2
     assert reg.is_live("the smiths", "“RANK”")          # casefolded
     assert not reg.is_live("the smiths", "The Queen Is Dead")
     assert not reg.is_live("duster", "“Rank”")          # other artist
@@ -72,3 +77,24 @@ def test_non_dict_entries_are_skipped_not_fatal(tmp_path, caplog):
         reg = build_registry(["oops", None, {"artist": "A", "album": "B"}])
     assert len(reg) == 1
     assert any("non-mapping" in r.getMessage() for r in caplog.records)
+
+
+# --- Multi-indexing (xhigh review fix, 2026-08-11): a mark must fire under
+# every key space a caller presents, not just the plain normalize_artist_key
+# form the entry was authored under. ---------------------------------------
+
+def test_registry_matches_identity_resolved_keys():
+    """Pool-dedupe sites look up by ensemble-stripped identity key; a mark on
+    'Bill Evans Trio' must fire for a row keyed 'bill evans'."""
+    reg = build_registry([{"artist": "Bill Evans Trio", "album": "Live Album"}])
+    assert reg.album_keys_for("bill evans trio")            # plain
+    assert reg.album_keys_for("bill evans")                 # identity-stripped
+    assert not reg.album_keys_for("bill withers")
+
+
+def test_registry_matches_alias_resolved_keys(monkeypatch):
+    import src.playlist.live_albums as la
+    monkeypatch.setattr(la, "resolve_alias", lambda k: "alias_group:x" if k == "sigur ros" else k, raising=False)
+    reg = build_registry([{"artist": "Sigur Ros", "album": "Live In Reykjavik"}])
+    assert reg.album_keys_for("sigur ros")
+    assert reg.album_keys_for("alias_group:x")
