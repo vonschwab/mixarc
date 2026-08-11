@@ -288,6 +288,23 @@ class BlacklistArtistRequest(BaseModel):
     artist: str
 
 
+class LiveAlbumEntry(BaseModel):
+    artist: str
+    album: str
+    source: str = "manual"
+    marked: Optional[str] = None
+
+
+class LiveAlbumsResponse(BaseModel):
+    entries: list[LiveAlbumEntry] = Field(default_factory=list)
+
+
+class LiveAlbumSetRequest(BaseModel):
+    artist: str
+    album: str
+    enabled: bool = True
+
+
 class AnalyzeToolRequest(BaseModel):
     stages: list[str] = Field(default_factory=list)
     force: bool = False

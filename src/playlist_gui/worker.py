@@ -2346,6 +2346,49 @@ def handle_blacklist_scope_set(cmd_data: Dict[str, Any]) -> None:
         emit_done("blacklist_scope_set", False, str(e))
 
 
+def handle_live_albums_fetch(cmd_data: Dict[str, Any]) -> None:
+    """List manually-marked live albums (data/live_albums.yaml)."""
+    from src.playlist.live_albums import read_live_albums
+    try:
+        entries = read_live_albums()
+        emit_result("live_albums", {"entries": entries, "count": len(entries)})
+        emit_done("live_albums_fetch", True, f"Fetched {len(entries)} live-album mark(s)")
+    except Exception as e:
+        tb = traceback.format_exc()
+        emit_error(str(e), tb)
+        emit_done("live_albums_fetch", False, str(e))
+
+
+def handle_live_album_set(cmd_data: Dict[str, Any]) -> None:
+    """Add or remove a live-album mark. Keyed like the album blacklist."""
+    from src.playlist.live_albums import read_live_albums, save_live_albums
+    from src.string_utils import normalize_artist_key
+    from src.metadata_client import _normalize_album_key
+    import datetime as _dt
+    try:
+        artist = str(cmd_data.get("artist") or "")
+        album = str(cmd_data.get("album") or "")
+        enabled = bool(cmd_data.get("enabled", True))
+        if not artist.strip() or not album.strip():
+            raise ValueError("artist and album are required")
+        ak, alk = normalize_artist_key(artist), _normalize_album_key(album)
+        entries = [
+            e for e in read_live_albums()
+            if not (normalize_artist_key(str(e.get("artist") or "")) == ak
+                    and _normalize_album_key(str(e.get("album") or "")) == alk)
+        ]
+        if enabled:
+            entries.append({"artist": artist, "album": album, "source": "manual",
+                            "marked": _dt.date.today().isoformat()})
+        save_live_albums(entries)   # backs up + busts the lru_cache
+        emit_done("live_album_set", True,
+                  f"{'Marked' if enabled else 'Unmarked'} live: {artist} — {album}")
+    except Exception as e:
+        tb = traceback.format_exc()
+        emit_error(str(e), tb)
+        emit_done("live_album_set", False, str(e))
+
+
 def handle_enrich_artist(cmd_data: Optional[Dict[str, Any]] = None, *, artist: str = "", request_id: str = "") -> Dict[str, Any]:
     """Run the full hybrid enrichment pipeline for an artist as subprocess invocations.
 
@@ -3398,6 +3441,8 @@ TRACKED_COMMAND_HANDLERS = {
     "blacklist_fetch_scopes": handle_blacklist_fetch_scopes,
     "blacklist_set": handle_blacklist_set,
     "blacklist_scope_set": handle_blacklist_scope_set,
+    "live_albums_fetch": handle_live_albums_fetch,
+    "live_album_set": handle_live_album_set,
     "enrich_artist": handle_enrich_artist_cmd,
     "enrich_genres": handle_enrich_genres_cmd,
     "edit_genres": handle_edit_genres,

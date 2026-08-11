@@ -71,6 +71,7 @@ export interface GenerateRequestBody {
   exclude_seed_tracks_from_recency?: boolean;
   recency_enabled?: boolean;
   instrumental?: boolean;
+  exclude_live?: boolean;
   recency_days?: number;
   recency_plays_threshold?: number;
   artist_spacing?: string;
@@ -226,6 +227,17 @@ export interface BlacklistFetchResponse {
   albums: BlacklistEntry[];
   tracks: BlacklistEntry[];
   total: number;
+}
+
+export interface LiveAlbumEntry {
+  artist: string;
+  album: string;
+  source?: string;
+  marked?: string;
+}
+
+export interface LiveAlbumsResponse {
+  entries: LiveAlbumEntry[];
 }
 
 export interface AnalyzeToolRequest {

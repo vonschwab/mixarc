@@ -13,6 +13,7 @@ import type {
   EnrichToolRequest,
   GenerateRequestBody,
   JobOut,
+  LiveAlbumsResponse,
   Page,
   PlexExportRequest,
   EscalationDecisionRequest,
@@ -92,6 +93,16 @@ export const api = {
   },
   async getBlacklist(): Promise<BlacklistFetchResponse> {
     return jsonOrThrow(await fetch("/api/blacklist"));
+  },
+  async liveAlbums(): Promise<LiveAlbumsResponse> {
+    return jsonOrThrow(await fetch("/api/live-albums"));
+  },
+  async setLiveAlbum(req: { artist: string; album: string; enabled: boolean }): Promise<{ ok: boolean }> {
+    return jsonOrThrow(await fetch("/api/live-albums", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+    }));
   },
   async blacklistArtist(artist: string): Promise<{ ok: boolean }> {
     return jsonOrThrow(await fetch("/api/blacklist/artist", {

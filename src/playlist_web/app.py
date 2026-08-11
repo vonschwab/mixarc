@@ -32,6 +32,8 @@ from .schemas import (
     EscalationDecisionRequest,
     GenerateRequestBody,
     JobOut,
+    LiveAlbumSetRequest,
+    LiveAlbumsResponse,
     PlexExportRequest,
     ReplaceSuggestionsRequest,
     ReplaceSuggestionsResponse,
@@ -878,6 +880,33 @@ def create_app(
         except WorkerCommandError as exc:
             raise HTTPException(status_code=422, detail=str(exc))
         return {"ok": True, **result}
+
+    @app.get("/api/live-albums")
+    async def get_live_albums() -> LiveAlbumsResponse:
+        try:
+            result = await bridge.command({"cmd": "live_albums_fetch"})
+        except BridgeBusy:
+            raise HTTPException(status_code=409, detail="A generation is in progress — try again when it finishes.")
+        except WorkerCommandError as exc:
+            raise HTTPException(status_code=502, detail=str(exc))
+        return LiveAlbumsResponse(entries=result.get("entries", []))
+
+    @app.post("/api/live-albums")
+    async def set_live_album(body: LiveAlbumSetRequest) -> dict:
+        if not body.artist.strip() or not body.album.strip():
+            raise HTTPException(status_code=422, detail="artist and album are required")
+        try:
+            await bridge.command({
+                "cmd": "live_album_set",
+                "artist": body.artist,
+                "album": body.album,
+                "enabled": body.enabled,
+            })
+        except BridgeBusy:
+            raise HTTPException(status_code=409, detail="A generation is in progress — try again when it finishes.")
+        except WorkerCommandError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        return {"ok": True}
 
     @app.post("/api/edit_genres")
     async def edit_genres(body: EditGenresRequest) -> dict:
