@@ -460,7 +460,10 @@ def _load_albums_for_indices(bundle, indices: List[int], db_path: str) -> Dict[i
 
     The artifact bundle does not carry album names, but version-preference needs
     them to catch album-based live recordings (clean track title, live album).
-    Best-effort: returns {} on any error. Reads metadata.db read-only."""
+    Best-effort: returns {} on any error. Reads metadata.db read-only.
+
+    Also used for candidate-pool dedupe (~7k indices); SQLite's variable limit is
+    32766, so a single batched query is safe at pool scale."""
     import sqlite3
 
     track_ids = getattr(bundle, "track_ids", None)
@@ -525,7 +528,26 @@ def _dedupe_artist_indices(
         return (score, dur, -i)  # highest score, then longest, then stable
 
     for members in groups.values():
-        kept.append(members[0] if len(members) == 1 else max(members, key=_rank))
+        if len(members) == 1:
+            kept.append(members[0])
+            continue
+        # _rank is a strict total order (the -i term is unique), so sorted()[0] == max().
+        ranked = sorted(members, key=_rank, reverse=True)
+        kept.append(ranked[0])
+        if logger.isEnabledFor(logging.DEBUG):
+            w_score, w_dur, _ = _rank(ranked[0])
+            r_score, r_dur, _ = _rank(ranked[1])
+            # A score tie resolved by a much-longer winner is the signature of an
+            # undetected live take (live cuts run long). Surfacing it as data is how
+            # the next bootleg-naming family gets found -- see the spec's §B.
+            if w_score == r_score and r_dur > 0 and w_dur >= 1.25 * r_dur:
+                _alb = albums_by_index or {}
+                logger.debug(
+                    "Version tie decided by duration: kept %r (%s, %.0fs) over %r (%s, %.0fs) "
+                    "- possible undetected live take",
+                    str(track_titles[ranked[0]]), _alb.get(ranked[0], "?"), w_dur / 1000.0,
+                    str(track_titles[ranked[1]]), _alb.get(ranked[1], "?"), r_dur / 1000.0,
+                )
     return sorted(kept)
 
 

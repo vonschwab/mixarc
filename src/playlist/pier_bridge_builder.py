@@ -484,6 +484,7 @@ def build_pier_bridge_playlist(
     energy_matrix: Optional[np.ndarray] = None,
     voice_prob: Optional[np.ndarray] = None,
     popularity_values: Optional[np.ndarray] = None,
+    albums_by_index: Optional[Dict[int, str]] = None,
     min_gap: int = 1,
     deadline: Optional[float] = None,
     sonic_tag_affinity: Optional[np.ndarray] = None,
@@ -651,7 +652,9 @@ def build_pier_bridge_playlist(
     logger.info("Pier+Bridge: %d seeds, target %d tracks", num_seeds, total_tracks)
 
     # Deduplicate candidate pool by artist+title
-    deduped_pool, _ = _dedupe_candidate_pool(candidate_pool_indices, bundle)
+    deduped_pool, _ = _dedupe_candidate_pool(
+        candidate_pool_indices, bundle, albums_by_index=albums_by_index
+    )
 
     # Exclude seed indices from candidate pool
     seed_set = set(seed_indices)

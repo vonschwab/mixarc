@@ -12,7 +12,7 @@ Two responsibilities:
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from src.features.artifacts import ArtifactBundle
 from src.playlist.identity_keys import identity_keys_for_index
@@ -98,6 +98,7 @@ def resolve_pier_seeds(
 def dedupe_pool_by_track_key(
     bundle: ArtifactBundle,
     pool_indices: List[int],
+    albums_by_index: Optional[Dict[int, str]] = None,
 ) -> List[int]:
     """Group candidate-pool indices by (artist, normalized title) track key,
     keep the canonical version per group (highest version-preference score).
@@ -122,7 +123,8 @@ def dedupe_pool_by_track_key(
         best_score = -1
         for idx in indices:
             title = str(bundle.track_titles[idx]) if bundle.track_titles is not None else ""
-            score = calculate_version_preference_score(title)
+            album = (albums_by_index or {}).get(int(idx), "")
+            score = calculate_version_preference_score(title, album)
             if score > best_score:
                 best_score = score
                 best_idx = idx

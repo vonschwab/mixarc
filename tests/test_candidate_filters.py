@@ -585,6 +585,249 @@ def test_one_each_retries_with_relaxed_candidate_gate_when_pier_bridge_infeasibl
     assert result.stats["playlist"]["one_each_candidate_relaxation"]["attempt"] == 1
 
 
+def test_one_each_retry_recomputes_album_map_for_new_pool_indices(tmp_path, monkeypatch):
+    """FIX 1 regression (final review, 2026-07-27, version-preference-bootleg-
+    detection): the One-Each retry rebuilds the candidate pool with relaxed
+    floors, which admits indices that were NOT in the original pool. The retry
+    must recompute the album map for its OWN pool -- not reuse the first
+    attempt's map -- or newly admitted indices score title-only inside the same
+    dedupe pass as album-aware ones.
+    """
+    from src.playlist.candidate_pool import CandidatePoolResult
+    from src.playlist.pipeline import generate_playlist_ds
+    from src.playlist.pier_bridge_builder import PierBridgeResult
+    import src.playlist.artist_style as artist_style_module
+    import src.playlist.pipeline.core as pipeline_core
+
+    artifact_path = _write_tiny_artifact(tmp_path, "tiny_one_each_retry_albums.npz")
+
+    pool_calls = []
+
+    def _fake_build_candidate_pool(**kwargs):
+        pool_calls.append((kwargs["cfg"], kwargs.get("min_genre_similarity")))
+        # First attempt: only idx 2. Retry (relaxed floors): admits idx 1 too --
+        # NOT present in the first attempt's pool.
+        indices = np.array([2] if len(pool_calls) == 1 else [1, 2], dtype=int)
+        return CandidatePoolResult(
+            pool_indices=indices,
+            eligible_indices=indices,
+            seed_sim=np.ones(len(indices), dtype=float),
+            sonic_sim=np.ones(len(indices), dtype=float),
+            stats={
+                "pool_size": len(indices),
+                "eligible_count": len(indices),
+                "total_candidates_considered": 1,
+                "below_similarity_floor": 0,
+                "below_sonic_similarity": 0,
+                "below_genre_similarity": 0,
+            },
+            params_effective={
+                "similarity_floor": kwargs["cfg"].similarity_floor,
+                "min_sonic_similarity": kwargs["cfg"].min_sonic_similarity,
+                "min_genre_similarity": kwargs.get("min_genre_similarity"),
+            },
+        )
+
+    bridge_calls = []
+
+    def _fake_build_pier_bridge_playlist(**kwargs):
+        bridge_calls.append(kwargs)
+        if len(bridge_calls) == 1:
+            return PierBridgeResult(
+                track_ids=[],
+                track_indices=[],
+                seed_positions=[],
+                segment_diagnostics=[],
+                stats={},
+                success=False,
+                failure_reason="Segment 0 infeasible under bridge_floor backoff",
+            )
+        return PierBridgeResult(
+            track_ids=["t0", "t2", "t1"],
+            track_indices=[0, 2, 1],
+            seed_positions=[0, 2],
+            segment_diagnostics=[],
+            stats={"edge_scores": []},
+            success=True,
+        )
+
+    def _fake_load_albums_for_indices(bundle, indices, db_path):
+        return {int(i): f"Album{int(i)}" for i in indices}
+
+    monkeypatch.setattr(pipeline_core, "build_candidate_pool", _fake_build_candidate_pool)
+    monkeypatch.setattr(pipeline_core, "build_pier_bridge_playlist", _fake_build_pier_bridge_playlist)
+    monkeypatch.setattr(artist_style_module, "_load_albums_for_indices", _fake_load_albums_for_indices)
+
+    generate_playlist_ds(
+        artifact_path=str(artifact_path),
+        seed_track_id="t0",
+        anchor_seed_ids=["t1"],
+        num_tracks=3,
+        mode="narrow",
+        random_seed=0,
+        allowed_track_ids=["t0", "t1", "t2"],
+        overrides={
+            "candidate_pool": {
+                "genre_compatibility_enabled": True,
+                "genre_compatibility_penalty_strength": 0.3,
+                "min_sonic_similarity": 0.20,
+            },
+            "pier_bridge": {"max_non_seed_tracks_per_artist": 1},
+        },
+        sonic_weight=0.5,
+        genre_weight=0.5,
+        min_genre_similarity=0.4,
+        genre_method="ensemble",
+    )
+
+    assert len(bridge_calls) == 2
+    # First attempt's album map is scoped to its own (smaller) pool.
+    assert bridge_calls[0]["albums_by_index"] == {2: "Album2"}
+    # The retry admitted idx 1, which was absent from the first attempt's pool.
+    # Its album map must be recomputed for the retry's own pool -- the stale
+    # first-attempt map would be missing idx 1 entirely.
+    assert bridge_calls[1]["albums_by_index"] == {1: "Album1", 2: "Album2"}
+
+
+def test_pool_dedupe_warns_with_db_path_when_album_lookup_empty(tmp_path, monkeypatch, caplog):
+    """FIX 3 regression: the album-lookup warning must name the database it
+    queried (the purpose-built detector for "the worker resolved a different
+    database_path"), and must fire when the pool is non-empty but the lookup
+    still came back empty."""
+    import logging as _logging
+    from src.playlist.candidate_pool import CandidatePoolResult
+    from src.playlist.pipeline import generate_playlist_ds
+    from src.playlist.pier_bridge_builder import PierBridgeResult
+    import src.playlist.artist_style as artist_style_module
+    import src.playlist.pipeline.core as pipeline_core
+
+    artifact_path = _write_tiny_artifact(tmp_path, "tiny_pool_warn_nonempty.npz")
+
+    def _fake_build_candidate_pool(**kwargs):
+        indices = np.array([2], dtype=int)
+        return CandidatePoolResult(
+            pool_indices=indices,
+            eligible_indices=indices,
+            seed_sim=np.ones(len(indices), dtype=float),
+            sonic_sim=np.ones(len(indices), dtype=float),
+            stats={
+                "pool_size": len(indices),
+                "eligible_count": len(indices),
+                "total_candidates_considered": 1,
+                "below_similarity_floor": 0,
+                "below_sonic_similarity": 0,
+                "below_genre_similarity": 0,
+            },
+            params_effective={
+                "similarity_floor": kwargs["cfg"].similarity_floor,
+                "min_sonic_similarity": kwargs["cfg"].min_sonic_similarity,
+                "min_genre_similarity": kwargs.get("min_genre_similarity"),
+            },
+        )
+
+    def _fake_build_pier_bridge_playlist(**kwargs):
+        return PierBridgeResult(
+            track_ids=["t0", "t2", "t1"],
+            track_indices=[0, 2, 1],
+            seed_positions=[0, 2],
+            segment_diagnostics=[],
+            stats={"edge_scores": []},
+            success=True,
+        )
+
+    monkeypatch.setattr(pipeline_core, "build_candidate_pool", _fake_build_candidate_pool)
+    monkeypatch.setattr(pipeline_core, "build_pier_bridge_playlist", _fake_build_pier_bridge_playlist)
+    monkeypatch.setattr(artist_style_module, "_load_albums_for_indices", lambda *a, **k: {})
+
+    # Scoped to tmp_path -- a relative path here would land (and leak a stray
+    # .db file) in the repo root, since some downstream readers (e.g. the BPM
+    # loader) connect to it eagerly.
+    _fake_db_path = str(tmp_path / "custom_meta_test.db")
+
+    with caplog.at_level(_logging.WARNING, logger="src.playlist.pipeline.core"):
+        generate_playlist_ds(
+            artifact_path=str(artifact_path),
+            seed_track_id="t0",
+            anchor_seed_ids=["t1"],
+            num_tracks=3,
+            mode="narrow",
+            random_seed=0,
+            allowed_track_ids=["t0", "t1", "t2"],
+            overrides={"library": {"database_path": _fake_db_path}},
+            sonic_weight=0.5,
+            genre_weight=0.5,
+        )
+
+    warnings = [r.message for r in caplog.records if r.levelno == _logging.WARNING]
+    assert any("Pool dedupe" in m and _fake_db_path in m for m in warnings)
+
+
+def test_pool_dedupe_does_not_warn_when_pool_is_starved(tmp_path, monkeypatch, caplog):
+    """FIX 3 regression: an empty (starved) pool must NOT fire the album-lookup
+    warning -- "album lookup returned nothing" is a false alarm there, since
+    there was nothing to look up in the first place."""
+    import logging as _logging
+    from src.playlist.candidate_pool import CandidatePoolResult
+    from src.playlist.pipeline import generate_playlist_ds
+    from src.playlist.pier_bridge_builder import PierBridgeResult
+    import src.playlist.artist_style as artist_style_module
+    import src.playlist.pipeline.core as pipeline_core
+
+    artifact_path = _write_tiny_artifact(tmp_path, "tiny_pool_warn_empty.npz")
+
+    def _fake_build_candidate_pool(**kwargs):
+        indices = np.array([], dtype=int)
+        return CandidatePoolResult(
+            pool_indices=indices,
+            eligible_indices=indices,
+            seed_sim=np.ones(0, dtype=float),
+            sonic_sim=np.ones(0, dtype=float),
+            stats={
+                "pool_size": 0,
+                "eligible_count": 0,
+                "total_candidates_considered": 0,
+                "below_similarity_floor": 0,
+                "below_sonic_similarity": 0,
+                "below_genre_similarity": 0,
+            },
+            params_effective={
+                "similarity_floor": kwargs["cfg"].similarity_floor,
+                "min_sonic_similarity": kwargs["cfg"].min_sonic_similarity,
+                "min_genre_similarity": kwargs.get("min_genre_similarity"),
+            },
+        )
+
+    def _fake_build_pier_bridge_playlist(**kwargs):
+        return PierBridgeResult(
+            track_ids=["t0", "t1"],
+            track_indices=[0, 1],
+            seed_positions=[0, 1],
+            segment_diagnostics=[],
+            stats={"edge_scores": []},
+            success=True,
+        )
+
+    monkeypatch.setattr(pipeline_core, "build_candidate_pool", _fake_build_candidate_pool)
+    monkeypatch.setattr(pipeline_core, "build_pier_bridge_playlist", _fake_build_pier_bridge_playlist)
+    monkeypatch.setattr(artist_style_module, "_load_albums_for_indices", lambda *a, **k: {})
+
+    with caplog.at_level(_logging.WARNING, logger="src.playlist.pipeline.core"):
+        generate_playlist_ds(
+            artifact_path=str(artifact_path),
+            seed_track_id="t0",
+            anchor_seed_ids=["t1"],
+            num_tracks=2,
+            mode="narrow",
+            random_seed=0,
+            allowed_track_ids=["t0", "t1", "t2"],
+            sonic_weight=0.5,
+            genre_weight=0.5,
+        )
+
+    warnings = [r.message for r in caplog.records if r.levelno == _logging.WARNING]
+    assert not any("Pool dedupe" in m for m in warnings)
+
+
 def test_allowed_set_applies_excluded_track_ids_in_pipeline(tmp_path, monkeypatch):
     """
     Regression test: style-aware runs pass both ``allowed_track_ids`` and
