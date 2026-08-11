@@ -83,6 +83,7 @@ data/mert_calibration_track_ids.txt
 data/mert_calibration_seeds_diverse.txt
 # Personal artist alias/sibling curation — user-built via the GUI, not shipped in the public repo
 data/artist_aliases.yaml
+data/live_albums.yaml
 # Legacy hand-curated genre-similarity overrides — superseded by genre_similarity_graph.yaml + taxonomy steering (feeds only the off-by-default dj_bridging ladder)
 data/genre_similarity.yaml
 
