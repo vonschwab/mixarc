@@ -48,6 +48,9 @@ EMPTY_REGISTRY = LiveAlbumRegistry()
 def build_registry(entries: List[dict]) -> LiveAlbumRegistry:
     by_artist: Dict[str, set] = {}
     for e in entries or []:
+        if not isinstance(e, dict):
+            logger.warning("live_albums: skipping non-mapping entry: %r", e)
+            continue
         ak = normalize_artist_key(str(e.get("artist") or ""))
         alk = _normalize_album_key(str(e.get("album") or ""))
         if ak and alk:
@@ -61,6 +64,9 @@ def build_registry(entries: List[dict]) -> LiveAlbumRegistry:
 def _validate(entries: List[dict]) -> List[str]:
     errors = []
     for i, e in enumerate(entries or []):
+        if not isinstance(e, dict):
+            errors.append(f"entry {i}: not a mapping")
+            continue
         if not str(e.get("artist") or "").strip():
             errors.append(f"entry {i}: missing artist")
         if not str(e.get("album") or "").strip():

@@ -63,3 +63,12 @@ def test_empty_registry_is_inert():
 def test_save_rejects_invalid_entries(tmp_path):
     with pytest.raises(ValueError):
         save_live_albums([{"album": "No Artist"}], path=tmp_path / "x.yaml")
+
+
+def test_non_dict_entries_are_skipped_not_fatal(tmp_path, caplog):
+    import logging
+    from src.playlist.live_albums import build_registry
+    with caplog.at_level(logging.WARNING, logger="src.playlist.live_albums"):
+        reg = build_registry(["oops", None, {"artist": "A", "album": "B"}])
+    assert len(reg) == 1
+    assert any("non-mapping" in r.getMessage() for r in caplog.records)
