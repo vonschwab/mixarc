@@ -14,11 +14,20 @@ def _make_artifact(tmp_path, track_ids):
 
 
 def _make_metadata(tmp_path, rows):
-    # rows: (track_id, title, musicbrainz_id, artist_key)
+    # rows: (track_id, title, musicbrainz_id, artist_key[, album])
+    # `album` mirrors the real schema: the sidecar build reads it so version
+    # preference can demote a live take whose TITLE is clean and whose
+    # live-ness lives only in the album name.
     db = str(tmp_path / "metadata.db")
     with sqlite3.connect(db) as conn:
-        conn.execute("CREATE TABLE tracks (track_id TEXT, title TEXT, musicbrainz_id TEXT, artist_key TEXT)")
-        conn.executemany("INSERT INTO tracks VALUES (?,?,?,?)", rows)
+        conn.execute(
+            "CREATE TABLE tracks (track_id TEXT, title TEXT, musicbrainz_id TEXT, "
+            "artist_key TEXT, album TEXT)"
+        )
+        conn.executemany(
+            "INSERT INTO tracks VALUES (?,?,?,?,?)",
+            [tuple(r) + ("",) * (5 - len(r)) for r in rows],
+        )
     return db
 
 

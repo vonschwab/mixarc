@@ -86,13 +86,28 @@ def resolve_top_tracks_to_rank(
         normalize_title_for_dedupe,
     )
 
-    by_mbid: Dict[str, str] = {}
+    def _preference(lt: dict) -> tuple:
+        return (
+            calculate_version_preference_score(
+                str(lt.get("title") or ""), str(lt.get("album") or "")
+            ),
+            str(lt["track_id"]),
+        )
+
+    by_mbid: Dict[str, dict] = {}
     by_norm: Dict[str, List[dict]] = {}
     for lt in local_tracks:
         mbid = str(lt.get("musicbrainz_id") or "")
         if mbid:
-            # first local track wins if two share an mbid (rare)
-            by_mbid.setdefault(mbid, str(lt["track_id"]))
+            # Sharing an mbid across albums is NOT rare (609 mbids over 2912 tracks
+            # in the live library): a live take and the studio cut of the same song
+            # routinely carry the same recording id. "First local track wins" let
+            # SQLite row order decide, and short-circuited version preference
+            # entirely -- the studio version was never scored. Apply the same
+            # preference the title branch below uses.
+            prev = by_mbid.get(mbid)
+            if prev is None or _preference(lt) > _preference(prev):
+                by_mbid[mbid] = lt
         norm = normalize_title_for_dedupe(str(lt.get("title") or ""), mode="loose")
         if norm:
             by_norm.setdefault(norm, []).append(lt)
@@ -103,21 +118,12 @@ def resolve_top_tracks_to_rank(
         tid: Optional[str] = None
         mbid = str(t.get("mbid") or "")
         if mbid and mbid in by_mbid:
-            tid = by_mbid[mbid]
+            tid = str(by_mbid[mbid]["track_id"])
         else:
             norm = normalize_title_for_dedupe(str(t.get("name") or ""), mode="loose")
             cands = by_norm.get(norm, [])
             if cands:
-                best = max(
-                    cands,
-                    key=lambda lt: (
-                        calculate_version_preference_score(
-                            str(lt.get("title") or ""), str(lt.get("album") or "")
-                        ),
-                        str(lt["track_id"]),
-                    ),
-                )
-                tid = str(best["track_id"])
+                tid = str(max(cands, key=_preference)["track_id"])
         if tid is not None and (tid not in out or rank < out[tid]):
             out[tid] = rank
     return out
@@ -180,6 +186,7 @@ def log_seed_popularity(
     pier_titles: Sequence[str],
     *,
     db_path: str,
+    pier_albums: Optional[Sequence[str]] = None,
 ) -> None:
     """Log each chosen pier's Last.fm popularity rank (diagnostic for Popular Seeds).
 
@@ -200,9 +207,17 @@ def log_seed_popularity(
         )
         return
     n = len(top)
+    # Album feeds the live-recording half of version preference; without it a
+    # clean-titled live take resolves as if it were the studio cut.
+    albums = list(pier_albums or [])
     local = [
-        {"track_id": str(tid), "title": str(title or ""), "musicbrainz_id": ""}
-        for tid, title in zip(pier_track_ids, pier_titles)
+        {
+            "track_id": str(tid),
+            "title": str(title or ""),
+            "album": str(albums[i]) if i < len(albums) else "",
+            "musicbrainz_id": "",
+        }
+        for i, (tid, title) in enumerate(zip(pier_track_ids, pier_titles))
     ]
     ranks = resolve_top_tracks_to_rank(top, local)
     logger.info(
@@ -222,12 +237,17 @@ def _local_tracks_by_artist(metadata_db: str, min_artist_tracks: int) -> Dict[st
     with sqlite3.connect(f"file:{metadata_db}?mode=ro", uri=True) as conn:
         conn.row_factory = sqlite3.Row
         for r in conn.execute(
-            "SELECT track_id, title, musicbrainz_id, artist_key FROM tracks "
+            # `album` is REQUIRED, not decorative: calculate_version_preference_score
+            # detects most live recordings from the album, not the (often clean)
+            # track title. Selecting only the title left that half of the detector
+            # inert on this path, which builds the popularity sidecar.
+            "SELECT track_id, title, album, musicbrainz_id, artist_key FROM tracks "
             "WHERE artist_key IS NOT NULL AND artist_key <> ''"
         ):
             by_artist.setdefault(str(r["artist_key"]), []).append({
                 "track_id": str(r["track_id"]),
                 "title": str(r["title"] or ""),
+                "album": str(r["album"] or ""),
                 "musicbrainz_id": str(r["musicbrainz_id"] or ""),
             })
     return {k: v for k, v in by_artist.items() if len(v) >= min_artist_tracks}
@@ -335,15 +355,24 @@ def load_pool_popularity_values(
     limit: int = 50,
     max_age_days: int = 30,
     now_iso: Optional[str] = None,
+    metadata_db_path: Optional[str] = None,
 ) -> Optional[np.ndarray]:
     """Per-track popularity (1 - rank/N) for every artist in the candidate pool,
     aligned to bundle.track_ids. NaN where unknown.
 
     `artist_name_by_key` maps normalized artist_key -> Last.fm display name and
     restricts the scan to the pool's distinct artists. Each artist's top tracks
-    are fetched cache-first + TTL and resolved (title-based) to that artist's
-    bundle rows. Returns None if `client` is None. Never raises (a failed fetch
-    leaves that artist's tracks NaN, never gating generation)."""
+    are fetched cache-first + TTL and resolved to that artist's bundle rows.
+    `metadata_db_path` supplies albums so version preference can demote a
+    clean-titled live take; without it that half of the detector is inert, as it
+    silently was here until 2026-08-10. Returns None if `client` is None. Never
+    raises (a failed fetch leaves that artist's tracks NaN, never gating
+    generation).
+
+    NOTE: no production caller today -- `load_pool_popularity_values_cached` is
+    what the live path uses. Kept in step with it so the two cannot diverge if
+    this one is ever wired up.
+    """
     if client is None:
         return None
     track_ids = bundle.track_ids
@@ -357,6 +386,14 @@ def load_pool_popularity_values(
         k = str(k)
         if k in artist_name_by_key:
             rows_by_key.setdefault(k, []).append(i)
+    # Albums so version preference demotes clean-titled live-album tracks.
+    from src.playlist.artist_style import _load_albums_for_indices
+    _albums = (
+        _load_albums_for_indices(
+            bundle, [i for idxs in rows_by_key.values() for i in idxs], metadata_db_path
+        )
+        if metadata_db_path else {}
+    )
     for key, idxs in rows_by_key.items():
         try:
             top = get_artist_top_tracks_cached_or_fetch(
@@ -370,6 +407,7 @@ def load_pool_popularity_values(
             "track_id": str(track_ids[i]),
             "title": str(titles[i]) if titles is not None else "",
             "musicbrainz_id": "",
+            "album": _albums.get(i, ""),
         } for i in idxs]
         ranks = resolve_top_tracks_to_rank(top, local)
         n = len(top)

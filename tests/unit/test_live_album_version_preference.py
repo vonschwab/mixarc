@@ -22,6 +22,41 @@ def test_alive_is_not_a_false_positive():
         calculate_version_preference_score("Song", "Studio Record")
 
 
+def test_shared_mbid_does_not_short_circuit_version_preference():
+    """The Smiths regression (2026-08-10): a live take and the studio cut of the
+    same song routinely carry the SAME recording mbid -- 609 mbids across 2912
+    tracks in the live library. `by_mbid` used to keep whichever row came first
+    ("first local track wins if two share an mbid (rare)"), so the mbid branch
+    resolved before version preference was ever consulted and SQLite row order
+    decided whether you got the live version.
+    """
+    from src.analyze.popularity_runner import resolve_top_tracks_to_rank
+
+    shared = "3f0421b3-c504-40e9-a926-ee8ac1643232"
+    top = [{"name": "The Queen Is Dead", "mbid": shared, "rank": 0}]
+    live = {"track_id": "live", "title": "The Queen Is Dead",
+            "album": "Rank (Live)", "musicbrainz_id": shared}
+    studio = {"track_id": "studio", "title": "The Queen Is Dead",
+              "album": "The Queen Is Dead", "musicbrainz_id": shared}
+
+    # Both row orders must resolve to the studio cut.
+    assert resolve_top_tracks_to_rank(top, [live, studio]) == {"studio": 0}
+    assert resolve_top_tracks_to_rank(top, [studio, live]) == {"studio": 0}
+
+
+def test_shared_mbid_tie_is_stable_across_row_order():
+    """When two versions score EQUALLY (neither album declares itself live), the
+    winner must still not depend on row order -- an unstable pick makes the same
+    playlist irreproducible run to run."""
+    from src.analyze.popularity_runner import resolve_top_tracks_to_rank
+
+    shared = "mbid-1"
+    top = [{"name": "Song", "mbid": shared, "rank": 0}]
+    a = {"track_id": "aaa", "title": "Song", "album": "Album One", "musicbrainz_id": shared}
+    b = {"track_id": "bbb", "title": "Song", "album": "Album Two", "musicbrainz_id": shared}
+    assert resolve_top_tracks_to_rank(top, [a, b]) == resolve_top_tracks_to_rank(top, [b, a])
+
+
 def test_resolver_prefers_studio_over_live_album_on_clean_title():
     # Last.fm #1 "Corpse Pose" maps to the STUDIO local file, not the live one,
     # even when the live file's track_id would win an album-blind tie-break.

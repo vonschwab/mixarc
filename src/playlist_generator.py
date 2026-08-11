@@ -2684,12 +2684,24 @@ class PlaylistGenerator:
                         popularity_cache_db_path,
                         log_seed_popularity,
                     )
+                    from src.playlist.artist_style import _load_albums_for_indices
                     _titles = getattr(bundle, "track_titles", None)
                     pier_titles = [
                         str(_titles[m]) if _titles is not None else "" for m in ordered_medoids
                     ]
+                    # Albums so version preference can tell a live take from the
+                    # studio cut -- most live recordings carry a clean title and
+                    # declare themselves only in the album.
+                    _pier_albums_by_idx = _load_albums_for_indices(
+                        bundle, [int(m) for m in ordered_medoids],
+                        resolve_database_path(self.config),
+                    )
+                    pier_albums = [
+                        _pier_albums_by_idx.get(int(m), "") for m in ordered_medoids
+                    ]
                     log_seed_popularity(
-                        artist_name, pier_ids, pier_titles, db_path=popularity_cache_db_path()
+                        artist_name, pier_ids, pier_titles,
+                        db_path=popularity_cache_db_path(), pier_albums=pier_albums,
                     )
                 # Tag-steering membership rescue: guarantee the authority's on-tag tracks
                 # are candidates even if the artist-genre gates (keyed on the SEED's genre
