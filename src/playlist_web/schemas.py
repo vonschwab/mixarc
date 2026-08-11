@@ -30,6 +30,7 @@ class GenerateRequestBody(BaseModel):
     # Policy fields — translated into config overrides via UIStateModel + derive_runtime_config
     recency_enabled: bool = True
     instrumental: bool = False
+    exclude_live: Optional[bool] = None
     recency_days: int = 14
     recency_plays_threshold: int = 1
     artist_spacing: str = "normal"

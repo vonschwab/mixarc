@@ -53,6 +53,8 @@ POLICY_OWNED_KEYS: Set[str] = {
     "playlists.ds_pipeline.candidate_pool.max_artist_fraction",
     # Instrumental lean (soft penalty; demotes vocal-classified tracks)
     "playlists.ds_pipeline.pier_bridge.instrumental_enabled",
+    # Live-album ban (song-scoped; live-only songs rescued)
+    "playlists.ds_pipeline.candidate_pool.exclude_live_albums",
 }
 """
 Keys that policy must always win for, even if Advanced Panel has values.
@@ -390,6 +392,13 @@ def derive_runtime_config(
     _set_nested(overrides, "playlists.ds_pipeline.pier_bridge.instrumental_enabled", ui.instrumental)
     if ui.instrumental:
         notes.append("Instrumental lean: demote vocal-classified tracks")
+
+    # ─────────────────────────────────────────────────────────────────────
+    # 3c. Live-album ban (song-scoped; live-only songs rescued)
+    # ─────────────────────────────────────────────────────────────────────
+    _set_nested(overrides, "playlists.ds_pipeline.candidate_pool.exclude_live_albums", ui.exclude_live)
+    if not ui.exclude_live:
+        notes.append("Live albums: allowed (marked-live tracks may appear)")
 
     # ─────────────────────────────────────────────────────────────────────
     # 4. Artist spacing → min_gap

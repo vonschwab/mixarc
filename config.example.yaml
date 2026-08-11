@@ -179,6 +179,11 @@ playlists:
       genre_rescue_k: 40      # Re-admit top-K sonic-nearest tracks rejected ONLY by the genre gate
                               # (keeps sonic connectors so tight genre modes can't crater the worst
                               # edge — slider eval 2026-07-04). 0 = off (rollback).
+      # Ban tracks from albums marked live in data/live_albums.yaml when a
+      # non-live version of the same song exists (live-only songs are rescued).
+      # The GUI "exclude live" checkbox writes this per-run; flip to false to
+      # let live versions compete (they still lose version-preference by -30).
+      exclude_live_albums: true
 
     # Artist style-aware pier-bridge (applies to --artist playlists)
     artist_style:

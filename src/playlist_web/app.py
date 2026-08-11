@@ -333,6 +333,7 @@ def create_app(
             recency_days=body.recency_days,
             recency_plays_threshold=body.recency_plays_threshold,
             instrumental=body.instrumental,
+            exclude_live=body.exclude_live if body.exclude_live is not None else True,
             artist_spacing=body.artist_spacing,  # type: ignore[arg-type]
             diversity_gamma=body.diversity_gamma,
             artist_diversity_mode=body.artist_diversity_mode,  # type: ignore[arg-type]

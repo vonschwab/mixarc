@@ -672,3 +672,19 @@ class TestOopsPopularityModeOverride:
             pl = derive_runtime_config(ui).overrides["playlists"]
             assert pl["sonic_mode"] == "strict"
             assert pl["pace_mode"] == "strict"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Live-album exclusion (Task 4)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_exclude_live_defaults_true_and_reaches_overrides():
+    from src.playlist_gui.ui_state import UIStateModel
+    from src.playlist_gui.policy import derive_runtime_config
+    state = UIStateModel(mode="artist")
+    assert state.exclude_live is True
+    d = derive_runtime_config(state)
+    assert d.overrides["playlists"]["ds_pipeline"]["candidate_pool"]["exclude_live_albums"] is True
+    d_off = derive_runtime_config(UIStateModel(mode="artist", exclude_live=False))
+    assert d_off.overrides["playlists"]["ds_pipeline"]["candidate_pool"]["exclude_live_albums"] is False

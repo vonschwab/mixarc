@@ -75,6 +75,14 @@ class UIStateModel:
     # ─────────────────────────────────────────────────────────────────────────
     instrumental: bool = False
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # Live-album exclusion (song-scoped; live-only songs rescued)
+    # ─────────────────────────────────────────────────────────────────────────
+    exclude_live: bool = True
+    """Ban live-marked albums' tracks from the pool when a non-live version of
+    the same song exists (data/live_albums.yaml). Default ON — marking an album
+    live is read as "I usually don't want this"."""
+
     history_window_days: int = 30
 
     genre_query: str = ""
